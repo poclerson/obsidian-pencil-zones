@@ -1,4 +1,4 @@
-/* Pencil Zones v0.7.2 — plain-JS Obsidian plugin (no build step).
+/* Pencil Zones v0.7.3 — plain-JS Obsidian plugin (no build step).
  *
  * - Command "Insert drawing zone" creates a resizable inline canvas.
  * - Strokes saved as standalone SVG in a configurable root folder.
@@ -485,31 +485,49 @@ class PencilZonesPlugin extends Plugin {
     editor.replaceSelection(snippet);
   }
 
+  // Locate our fence in note text. Returns string offsets + block text, or null.
+  locateBlock(src, text) {
+    const idx = text.indexOf("src: " + src);
+    if (idx === -1) return null;
+    const fenceStart = text.lastIndexOf("```" + CODE_LANG, idx);
+    const fenceEnd = text.indexOf("```", idx);
+    if (fenceStart === -1 || fenceEnd === -1) return null;
+    return { start: fenceStart, end: fenceEnd, block: text.slice(fenceStart, fenceEnd) };
+  }
+
+  patchBlock(block, patch) {
+    if (patch.height != null) {
+      const h = "height: " + Math.round(patch.height);
+      block = /^height\s*:/m.test(block)
+        ? block.replace(/^height\s*:.*$/m, h)
+        : block.replace(/^(src\s*:.*)$/m, "$1\n" + h);
+    }
+    if (patch.lines != null) {
+      const l = "lines: " + (patch.lines ? "true" : "false");
+      block = /^lines\s*:/m.test(block)
+        ? block.replace(/^lines\s*:.*$/m, l)
+        : block.replace(/^(src\s*:.*)$/m, "$1\n" + l);
+    }
+    return block;
+  }
+
   async persistBlockParams(src, patch) {
     try {
       const view = this.activeMarkdownView();
-      if (!view) return;
-      const editor = view.editor;
-      const text = editor.getValue();
-      const idx = text.indexOf("src: " + src);
-      if (idx === -1) return;
-      const fenceStart = text.lastIndexOf("```" + CODE_LANG, idx);
-      const fenceEnd = text.indexOf("```", idx);
-      if (fenceStart === -1 || fenceEnd === -1) return;
-      let block = text.slice(fenceStart, fenceEnd);
-      if (patch.height != null) {
-        const h = "height: " + Math.round(patch.height);
-        block = /^height\s*:/m.test(block)
-          ? block.replace(/^height\s*:.*$/m, h)
-          : block.replace(/^(src\s*:.*)$/m, "$1\n" + h);
+      if (view && view.editor) {
+        const editor = view.editor;
+        const loc = this.locateBlock(src, editor.getValue());
+        if (!loc) return;
+        editor.replaceRange(this.patchBlock(loc.block, patch), editor.offsetToPos(loc.start), editor.offsetToPos(loc.end));
+        return;
       }
-      if (patch.lines != null) {
-        const l = "lines: " + (patch.lines ? "true" : "false");
-        block = /^lines\s*:/m.test(block)
-          ? block.replace(/^lines\s*:.*$/m, l)
-          : block.replace(/^(src\s*:.*)$/m, "$1\n" + l);
-      }
-      editor.replaceRange(block, editor.offsetToPos(fenceStart), editor.offsetToPos(fenceEnd));
+      // Reading mode has no editor: persist through the vault instead.
+      const file = this.activeFile();
+      if (!file) return;
+      const text = await this.app.vault.read(file);
+      const loc = this.locateBlock(src, text);
+      if (!loc) return;
+      await this.app.vault.modify(file, text.slice(0, loc.start) + this.patchBlock(loc.block, patch) + text.slice(loc.end));
     } catch (e) {
       console.warn("Pencil Zones: could not persist block params", e);
     }
@@ -593,8 +611,11 @@ class PencilZonesPlugin extends Plugin {
 
   firstConnectedView(entry) {
     if (!entry) return null;
-    for (const v of entry.views) {
-      if (v.zoneEl.isConnected) return v;
+    // Newest wins: if stale duplicates ever exist, the latest render is
+    // the visible one. (Normally pruning keeps exactly one.)
+    const views = Array.from(entry.views);
+    for (let i = views.length - 1; i >= 0; i--) {
+      if (views[i].zoneEl.isConnected) return views[i];
     }
     return null;
   }
@@ -691,8 +712,21 @@ class PencilZonesPlugin extends Plugin {
       if (e.pointerType === "touch") return; // fingers never draw
       this.showToolbar();
       this.finalizeDraw(true); // recover from any stuck state, never refuse input
-      const view = this.firstConnectedView(entry);
-      if (!view) return;
+      // Prefer the view that owns the touched zone element: with duplicate
+      // or stale views around, first-connected may point at the wrong svg
+      // (wrong capture rect, ink appended off-screen).
+      let view = null;
+      for (const v of entry.views) {
+        if (v.zoneEl === zoneEl) {
+          view = v;
+          break;
+        }
+      }
+      if (!view || !view.zoneEl.isConnected) view = this.firstConnectedView(entry);
+      if (!view) {
+        this.dlog("stroke-noview", zoneEl.dataset.src);
+        return;
+      }
       const svg = view.svgEl();
       if (!svg) return;
       e.preventDefault();
@@ -704,7 +738,7 @@ class PencilZonesPlugin extends Plugin {
       }
       const pt = view.toSvgCoords(e);
       const erasing = this.tool === "eraser" || this.tool === "pxeraser";
-      this.draw = { entrySrc: entry.src, pointerId: e.pointerId, stroke: null, pathEl: null };
+      this.draw = { entrySrc: entry.src, pointerId: e.pointerId, stroke: null, pathEl: null, view };
       this.dlog("stroke-down", "id=" + e.pointerId + " tool=" + this.tool);
       if (erasing) {
         this.pushUndo(entry);
@@ -742,7 +776,13 @@ class PencilZonesPlugin extends Plugin {
         this.draw = null;
         return;
       }
-      const view = this.firstConnectedView(entry);
+      // Stick with the originating view while it is alive (stable capture
+      // rect); fall back to the newest connected view after a re-render.
+      let view = d.view && d.view.zoneEl && d.view.zoneEl.isConnected ? d.view : null;
+      if (!view) {
+        view = this.firstConnectedView(entry);
+        if (view) d.view = view;
+      }
       if (!view) return;
       e.preventDefault();
       const pt = view.toSvgCoords(e);
@@ -1681,6 +1721,13 @@ class PencilZonesPlugin extends Plugin {
   // ---------- drawing zone view ----------
 
   renderZone(source, el, ctx) {
+    // If Obsidian reuses this container across re-renders (Live Preview
+    // widget updates), clear it: otherwise every resize (which rewrites the
+    // block source) would stack another live zone here, and input/state
+    // would spread across stale duplicates.
+    try {
+      el.empty();
+    } catch (_) {}
     const params = parseCodeSource(source);
     const src = this.svgPath((params.src || "").trim());
     let height = parseInt(params.height || "", 10);
