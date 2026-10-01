@@ -137,8 +137,11 @@ function isBlackHex(c) {
 }
 
 function strokeWidthFor(stroke, sizes) {
+  // Per-stroke width wins (set at draw time); otherwise fall back to the
+  // zone's current size for that tool (legacy strokes).
+  if (stroke && typeof stroke.width === "number" && Number.isFinite(stroke.width)) return stroke.width;
   const s = sizes || DEFAULT_SIZES;
-  if (stroke.tool === "highlighter") return s.highlighter;
+  if (stroke && stroke.tool === "highlighter") return s.highlighter;
   return s.pencil;
 }
 
@@ -198,7 +201,7 @@ function buildSVG(strokes, w, h, showLines, sizes) {
     })
     .join("\n");
   const needsTheme = showLines || strokes.some((s) => isDynamicColor(s.color));
-  const data = JSON.stringify({ version: 3, width: w, lines: !!showLines, sizes: sz, strokes });
+  const data = JSON.stringify({ version: 4, width: w, lines: !!showLines, sizes: sz, strokes });
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">\n` +
     (needsTheme ? themedStyleBlock() : "") +
@@ -550,8 +553,14 @@ class PencilZonesPlugin extends Plugin {
       if (data.strokes.length) {
         // Legacy black (#000000) becomes dynamic ink: identical on light
         // theme, visible (white) on dark theme.
+        // Widthless strokes (pre-width format) are backfilled with the
+        // zone's loaded sizes, freezing exactly what is on screen: later
+        // pinches only affect new strokes.
         for (const s of data.strokes) {
           if (isBlackHex(s.color)) s.color = DYNAMIC_INK;
+          if (typeof s.width !== "number" || !Number.isFinite(s.width) || s.width <= 0 || s.width > 200) {
+            s.width = strokeWidthFor({ tool: s.tool }, entry.sizes);
+          }
         }
         entry.strokes = data.strokes;
         this.renderEntryViews(entry);
@@ -1670,7 +1679,7 @@ class PencilZonesPlugin extends Plugin {
         } else {
           changed = true;
           for (const r of runs) {
-            if (r.length >= 2) next.push({ points: r, color: s.color, tool: s.tool });
+            if (r.length >= 2) next.push({ points: r, color: s.color, tool: s.tool, width: s.width });
           }
         }
       }
@@ -1766,7 +1775,12 @@ class PencilZonesPlugin extends Plugin {
         plugin.scheduleSave(entry);
         return;
       }
-      activeStroke = { points: [pt], color: plugin.color, tool: plugin.tool };
+      activeStroke = {
+        points: [pt],
+        color: plugin.color,
+        tool: plugin.tool,
+        width: (entry.sizes || DEFAULT_SIZES)[plugin.tool],
+      };
       activePathEl = document.createElementNS(SVGNS, "path");
       activePathEl.setAttribute("fill", "none");
       activePathEl.setAttribute("stroke-linecap", "round");
