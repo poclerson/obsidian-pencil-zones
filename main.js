@@ -55,6 +55,7 @@ const DEFAULT_SETTINGS = {
   defaultLines: false,
   dockSide: "right", // "left" | "right": toolbar snaps to sides only
   dockYFrac: null, // 0..1 fraction of viewport height; null = bottom default
+  verboseLog: false, // console.log input diagnostics (buffer always records)
 };
 
 function pad2(n) {
@@ -256,6 +257,7 @@ class PencilZonesPlugin extends Plugin {
     this.activeSrc = null;
     this.typingHidden = false;
     this.moveMode = null;
+    this.diag = [];
 
     this.addSettingTab(new PencilZonesSettingTab(this.app, this));
 
@@ -275,6 +277,26 @@ class PencilZonesPlugin extends Plugin {
       id: "redo-stroke",
       name: "Redo stroke",
       callback: () => this.doRedo(),
+    });
+    this.addCommand({
+      id: "copy-diagnostics",
+      name: "Copy input diagnostics",
+      callback: async () => {
+        const text =
+          "Pencil Zones diagnostics\nentries=" +
+          this.entries.size +
+          " active=" +
+          this.activeSrc +
+          "\n" +
+          this.diag.join("\n");
+        try {
+          if (typeof navigator !== "undefined" && navigator.clipboard) {
+            await navigator.clipboard.writeText(text);
+          }
+        } catch (e) {
+          console.warn("[PZ] clipboard copy failed", e);
+        }
+      },
     });
 
     this.registerMarkdownCodeBlockProcessor(CODE_LANG, (source, el, ctx) => {
@@ -345,6 +367,16 @@ class PencilZonesPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  // Always-on input diagnostics ring buffer (cheap). "Copy input
+  // diagnostics" command dumps it for remote debugging.
+  dlog(tag, msg) {
+    try {
+      this.diag.push(new Date().toISOString().slice(11, 23) + " " + tag + (msg ? " " + msg : ""));
+      if (this.diag.length > 120) this.diag.splice(0, this.diag.length - 120);
+      if (this.settings && this.settings.verboseLog) console.log("[PZ]", tag, msg || "");
+    } catch (_) {}
   }
 
   svgPath(src) {
@@ -623,7 +655,10 @@ class PencilZonesPlugin extends Plugin {
         session.ids.add(t.identifier);
       }
       // Multi-touch cancels any in-progress stroke so gestures never draw.
-      if (map.size >= 2) this.cancelAllStrokes();
+      if (map.size >= 2) {
+        this.dlog("gesture-multitouch", "touches=" + map.size);
+        this.cancelAllStrokes();
+      }
     };
 
     const onMove = (e) => {
@@ -656,9 +691,12 @@ class PencilZonesPlugin extends Plugin {
       if (remaining !== 0 || !session) return;
       const s = session;
       session = null;
-      if (s.moved || Date.now() - s.start > TAP_MAX_MS) return;
+      const dt = Date.now() - s.start;
       const n = s.ids.size;
-      if (n !== 2 && n !== 3) return;
+      if (s.moved || dt > TAP_MAX_MS || (n !== 2 && n !== 3)) {
+        this.dlog("gesture-reject", "n=" + n + " dt=" + dt + " moved=" + s.moved);
+        return;
+      }
       // Prefer the zone under the lift point; fall back to a visible zone.
       let src = null;
       try {
@@ -672,6 +710,7 @@ class PencilZonesPlugin extends Plugin {
         const fb = this.firstConnectedEntry();
         if (fb) this.setActive(fb.src);
       }
+      this.dlog("gesture-fire", (n === 2 ? "undo" : "redo") + " src=" + (this.activeSrc || "?"));
       if (n === 2) this.doUndo();
       else this.doRedo();
     };
@@ -1534,17 +1573,46 @@ class PencilZonesPlugin extends Plugin {
     const isEraserTool = () => plugin.tool === "eraser" || plugin.tool === "pxeraser";
 
     // ---- drawing: pen + mouse only. Touch never draws. ----
+    // finalizeActive commits (or drops, when asked) whatever track state
+    // exists. Fresh pen/mouse contact ALWAYS recovers through it first:
+    // on iPad a pen stroke can lose its pointerup/cancel around
+    // multi-touch (or a setPointerCapture race), which used to leave
+    // activePointerId set forever and silently refuse all later input.
+    function finalizeActive(commit) {
+      if (activePointerId === null && !activeStroke) return false;
+      const pid = activePointerId;
+      const wasEraser = isEraserTool();
+      const hadStroke = !!activeStroke && activeStroke.points.length > 0;
+      activePointerId = null;
+      hideRing();
+      if (!wasEraser && hadStroke && commit) {
+        plugin.pushUndo(entry);
+        entry.redo = [];
+        entry.strokes.push(activeStroke);
+        plugin.scheduleSave(entry);
+      }
+      activeStroke = null;
+      activePathEl = null;
+      render();
+      plugin.dlog("stroke-finalize", "id=" + pid + " eraser=" + wasEraser + " pts=" + (hadStroke ? "yes" : "no") + " commit=" + commit);
+      return true;
+    }
+
     svg.addEventListener("pointerdown", (e) => {
       plugin.setActive(entry.src);
       if (e.pointerType === "touch") return; // fingers scroll / gesture / move, never draw
       plugin.showToolbar();
-      if (activePointerId !== null) return; // one stroke at a time
+      finalizeActive(true); // recover from any stuck state, never refuse input
       e.preventDefault();
       try {
         svg.setPointerCapture(e.pointerId);
-      } catch (_) {}
+      } catch (_) {
+        plugin.dlog("stroke-abort", "id=" + e.pointerId + " capture-failed");
+        return; // don't track a pointer we can't follow
+      }
       const pt = toSvgCoords(e);
       activePointerId = e.pointerId;
+      plugin.dlog("stroke-down", "id=" + e.pointerId + " tool=" + plugin.tool);
 
       if (isEraserTool()) {
         plugin.pushUndo(entry);
@@ -1592,32 +1660,17 @@ class PencilZonesPlugin extends Plugin {
 
     function finishStroke(e) {
       if (e.pointerId !== activePointerId) return;
-      activePointerId = null;
-      hideRing();
-      if (isEraserTool() || !activeStroke) {
-        activeStroke = null;
-        activePathEl = null;
-        return;
-      }
-      if (activeStroke.points.length > 0) {
-        plugin.pushUndo(entry);
-        entry.redo = [];
-        entry.strokes.push(activeStroke);
-        plugin.scheduleSave(entry);
-      }
-      activeStroke = null;
-      activePathEl = null;
-      render();
+      plugin.dlog("stroke-up", "id=" + e.pointerId);
+      finalizeActive(true);
+    }
+    function cancelStrokeInput(e) {
+      if (e.pointerId !== activePointerId) return;
+      plugin.dlog("stroke-cancel", "id=" + e.pointerId + " type=" + e.type);
+      finalizeActive(true); // commit partial ink rather than losing it
     }
     svg.addEventListener("pointerup", finishStroke);
-    svg.addEventListener("pointercancel", (e) => {
-      if (e.pointerId !== activePointerId) return;
-      activePointerId = null;
-      activeStroke = null;
-      activePathEl = null;
-      hideRing();
-      render();
-    });
+    svg.addEventListener("pointercancel", cancelStrokeInput);
+    svg.addEventListener("lostpointercapture", cancelStrokeInput);
     svg.addEventListener("pointerleave", () => {
       if (activePointerId === null) hideRing();
     });
@@ -1723,6 +1776,16 @@ class PencilZonesSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(!!this.plugin.settings.defaultLines).onChange(async (v) => {
           this.plugin.settings.defaultLines = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Verbose console logging")
+      .setDesc("Mirror input diagnostics (strokes, gestures, recovery) to the console. The buffer always records; use the Copy input diagnostics command to export it.")
+      .addToggle((t) =>
+        t.setValue(!!this.plugin.settings.verboseLog).onChange(async (v) => {
+          this.plugin.settings.verboseLog = v;
           await this.plugin.saveSettings();
         })
       );

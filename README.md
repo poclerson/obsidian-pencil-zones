@@ -50,3 +50,7 @@ lines: false
 - No pressure-sensitive width.
 - `touch-action: none` on canvases: the pen never scrolls the note mid-stroke, but finger-scroll starts outside a canvas.
 - Reading-view moves rely on block matching; exotic markdown (HTML blocks with blank lines, footnotes) can land a block off.
+
+## Debugging input issues
+
+The plugin keeps a rolling buffer (last ~120 events) of strokes, gestures, recovery, and moves. Run **Copy input diagnostics** from the command palette and paste the result into a bug report. **Verbose console logging** in settings mirrors the same stream to the dev console.
