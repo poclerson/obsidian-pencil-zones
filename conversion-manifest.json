@@ -1,0 +1,74 @@
+[
+  {
+    "old": "HTMD_20260904124005_E06J.svg",
+    "new": "PZ_20260904124005_E06J.svg",
+    "height": 1123,
+    "lines": true,
+    "strokes": 387,
+    "tools": {
+      "pencil": 387,
+      "highlighter": 0
+    },
+    "sha256": "69540833bb3458bb2cef8267bb541d1d9eede622827b84217f8a90a0f91c3ffc"
+  },
+  {
+    "old": "HTMD_20260915213126_ZQXW.svg",
+    "new": "PZ_20260915213126_ZQXW.svg",
+    "height": 1123,
+    "lines": false,
+    "strokes": 0,
+    "tools": {
+      "pencil": 0,
+      "highlighter": 0
+    },
+    "sha256": "b961875b29c354f4f36676c3db61849d64879dbe394e7da1b7d738bc208b986c"
+  },
+  {
+    "old": "HTMD_20260918124113_NBR2.svg",
+    "new": "PZ_20260918124113_NBR2.svg",
+    "height": 2246,
+    "lines": true,
+    "strokes": 676,
+    "tools": {
+      "pencil": 672,
+      "highlighter": 4
+    },
+    "sha256": "2071d6833a4e2a9ccef638e431de570cd6c4db39af1faa2e4ae4af97b422b0fd"
+  },
+  {
+    "old": "HTMD_20260921124112_PW5W.svg",
+    "new": "PZ_20260921124112_PW5W.svg",
+    "height": 1123,
+    "lines": true,
+    "strokes": 232,
+    "tools": {
+      "pencil": 232,
+      "highlighter": 0
+    },
+    "sha256": "dd6b9288b12ef1d10e67b855e8d0f619fa0d77232c347becd84de439fce03417"
+  },
+  {
+    "old": "HTMD_20260924124236_0J3R.svg",
+    "new": "PZ_20260924124236_0J3R.svg",
+    "height": 3369,
+    "lines": true,
+    "strokes": 688,
+    "tools": {
+      "pencil": 682,
+      "highlighter": 6
+    },
+    "sha256": "310a54c4f6f07628e46630aa07308b0885516f0bc2166d5231184147d530ddbe"
+  },
+  {
+    "old": "HTMD_20260928080940_GSNT.svg",
+    "new": "PZ_20260928080940_GSNT.svg",
+    "height": 1123,
+    "lines": true,
+    "strokes": 87,
+    "tools": {
+      "pencil": 87,
+      "highlighter": 0
+    },
+    "sha256": "47da220960b924d65169ca8e3f4bcf8749b4960cf8a1cd99a2c0fd6d8b20c3be"
+  }
+]
