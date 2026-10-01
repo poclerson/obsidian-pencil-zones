@@ -1,4 +1,4 @@
-/* Pencil Zones v0.7.3 — plain-JS Obsidian plugin (no build step).
+/* Pencil Zones v0.8.0 — plain-JS Obsidian plugin (no build step).
  *
  * - Command "Insert drawing zone" creates a resizable inline canvas.
  * - Strokes saved as standalone SVG in a configurable root folder.
@@ -1351,12 +1351,11 @@ class PencilZonesPlugin extends Plugin {
     return null;
   }
 
-  // Walk up to find the enclosing drawing zone (stops at resize handle).
+  // Walk up to find the enclosing drawing zone.
   zoneOf(node) {
     let n = node;
     while (n && n !== document.body) {
       if (n.classList) {
-        if (n.classList.contains("pz-resize")) return null;
         if (n.classList.contains("pz-zone")) return n;
       }
       n = n.parentNode;
@@ -1751,14 +1750,24 @@ class PencilZonesPlugin extends Plugin {
     const svg = document.createElementNS(SVGNS, "svg");
     svg.classList.add("pz-canvas");
     svg.setAttribute("viewBox", `0 0 ${CANVAS_W} ${Math.round(entry.height)}`);
+    // Element aspect must match the viewBox exactly: with the default
+    // meet-fit, any mismatch letterboxes the ink (offset grows toward the
+    // edges, content recenters on height change). aspect-ratio keeps them
+    // identical; preserveAspectRatio=none makes the mapping exact even if
+    // an outside style forces a size.
+    svg.setAttribute("preserveAspectRatio", "none");
     svg.setAttribute("width", String(CANVAS_W));
     svg.setAttribute("height", String(Math.round(entry.height)));
-    svg.style.height = Math.round(entry.height) + "px";
+    svg.style.width = "100%";
+    svg.style.height = "auto";
+    svg.style.aspectRatio = `${CANVAS_W} / ${Math.round(entry.height)}`;
     zone.appendChild(svg);
 
     let ring = null; // pixel-eraser cursor ring
 
     function toSvgCoords(e) {
+      // Exact only because the element aspect matches the viewBox (see
+      // aspect-ratio above): linear map, no letterbox bands.
       const r = svg.getBoundingClientRect();
       const x = ((e.clientX - r.left) / r.width) * CANVAS_W;
       const y = ((e.clientY - r.top) / r.height) * entry.height;
@@ -1800,7 +1809,9 @@ class PencilZonesPlugin extends Plugin {
       if (dd && dd.pathEl && dd.stroke && dd.entrySrc === entry.src) g.appendChild(dd.pathEl);
       svg.setAttribute("viewBox", `0 0 ${CANVAS_W} ${Math.round(entry.height)}`);
       svg.setAttribute("height", String(Math.round(entry.height)));
-      svg.style.height = Math.round(entry.height) + "px";
+      svg.style.width = "100%";
+      svg.style.height = "auto";
+      svg.style.aspectRatio = `${CANVAS_W} / ${Math.round(entry.height)}`;
     }
 
     // Object eraser: removes whole strokes on contact.
@@ -1909,55 +1920,13 @@ class PencilZonesPlugin extends Plugin {
     render();
     plugin.updateToolbarVisibility();
 
-    // Stroke input is document-delegated (setupDrawInput); nothing
-    // per-element here except the resize handle, so re-renders can never
-    // strand input listeners.
+    // Stroke input is document-delegated (setupDrawInput); no per-element
+    // input listeners here, so re-renders can never strand input.
 
     // Prevent iPad pinch-zoom / callout interference inside the zone.
     zone.addEventListener("gesturestart", (e) => e.preventDefault());
     zone.addEventListener("dblclick", (e) => e.preventDefault());
-    zone.addEventListener("contextmenu", (e) => {
-      if (e.target.closest && e.target.closest(".pz-resize")) return;
-      e.preventDefault();
-    });
-
-    // ---- resize handle (drag the three dots at the bottom edge) ----
-    const resize = zone.createDiv({ cls: "pz-resize" });
-    for (let i = 0; i < 3; i++) resize.createSpan({ cls: "pz-dot" });
-    let resizing = false;
-    let resizeStartY = 0;
-    let resizeStartH = 0;
-    resize.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      plugin.setActive(entry.src);
-      resizing = true;
-      resizeStartY = e.clientY;
-      resizeStartH = entry.height;
-      try {
-        resize.setPointerCapture(e.pointerId);
-      } catch (_) {}
-    });
-    resize.addEventListener("pointermove", (e) => {
-      if (!resizing) return;
-      e.preventDefault();
-      const r = svg.getBoundingClientRect();
-      const scale = entry.height / Math.max(1, r.height);
-      entry.height = Math.min(1200, Math.max(150, resizeStartH + (e.clientY - resizeStartY) * scale));
-      render();
-    });
-    async function endResize(e) {
-      if (!resizing) return;
-      resizing = false;
-      try {
-        resize.releasePointerCapture(e.pointerId);
-      } catch (_) {}
-      render();
-      await plugin.saveEntry(entry);
-      plugin.persistBlockParams(entry.src, { height: entry.height });
-    }
-    resize.addEventListener("pointerup", endResize);
-    resize.addEventListener("pointercancel", endResize);
+    zone.addEventListener("contextmenu", (e) => e.preventDefault());
   }
 }
 

@@ -43,7 +43,7 @@ lines: false
 
 - SVGs live in one configurable root folder (default `_inline_handwriting`), named `{Note}-{timestamp}-{rand}.svg`.
 - Files are transparent (theme shows through) and carry an embedded `prefers-color-scheme` style, so they look right as static embeds too. Editable stroke data rides along in `<desc id="pz-data">`.
-- Resize a zone with the three dots at its bottom; the height is written back to the block.
+- `height` sets the canvas data height (displayed width is always full-width, aspect preserved so ink lands exactly under the pencil).
 
 ## Limits
 

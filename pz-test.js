@@ -479,30 +479,10 @@ function findTag(el, tag) {
   fire(fakeDoc, "touchend", { touches: [], changedTouches: [touch(98, 300, 300)] });
   ok("third finger aborts pinch safely", entryP.strokes.length === 2 && entryP.undo.length === undoDepthP + 1);
 
-  // ---- resize -> persist -> re-render lifecycle (the 2-resize death) ----
-  const tick = (ms) => new Promise((r) => setTimeout(r, ms));
+  // ---- re-render lifecycle: no stacking, newest wins, draw survives ----
   mockFile = { path: "note-rz.md" };
   files["note-rz.md"] = ["# N", "", "```pencil-draw", "src: test/resize.svg", "height: 300", "lines: false", "```", "", "tail"].join("\n");
-  function mockEditorFor(path) {
-    const off = (lines, p) => {
-      let o = 0;
-      for (let i = 0; i < p.line; i++) o += lines[i].length + 1;
-      return o + p.ch;
-    };
-    return {
-      getValue: () => files[path],
-      offsetToPos: (o) => {
-        const before = files[path].slice(0, o).split("\n");
-        return { line: before.length - 1, ch: before[before.length - 1].length };
-      },
-      replaceRange: (txt, from, to) => {
-        const lines = files[path].split("\n");
-        const cur = files[path];
-        files[path] = cur.slice(0, off(lines, from)) + txt + cur.slice(off(lines, to));
-      },
-    };
-  }
-  mockView = { getMode: () => "source", containerEl: { querySelector: () => null }, editor: mockEditorFor("note-rz.md") };
+  mockView = { getMode: () => "source", containerEl: { querySelector: () => null }, editor: undefined };
 
   let rzHost = mkHost();
   const rzSrcLine = "src: test/resize.svg";
@@ -511,12 +491,18 @@ function findTag(el, tag) {
   const entryRz = plugin.entries.get("test/resize.svg");
   const zoneRz = () => findKids(rzHost, "pz-zone")[0];
   const svgRz = () => zoneRz().children.find((c) => c.tag === "svg");
-  const dotsRz = () => findKids(rzHost, "pz-resize")[0];
   const penStroke = (svg, id, x, y) => {
     fire(svg, "pointerdown", pev({ pointerId: id, clientX: x, clientY: y }));
     fire(svg, "pointermove", pev({ pointerId: id, clientX: x + 10, clientY: y + 5 }));
     fire(svg, "pointerup", pev({ pointerId: id }));
   };
+
+  // element aspect must match the viewBox: otherwise the default meet-fit
+  // letterboxes the ink and it no longer lands under the pencil (offset
+  // grows toward the edges, content recenters on height change).
+  const svgA = svgRz();
+  ok("canvas preserves viewBox aspect", svgA.style.aspectRatio === "800 / 300");
+  ok("canvas stretches on forced sizes", svgA.attrs.preserveAspectRatio === "none");
 
   // same container re-rendered repeatedly must not stack zones
   plugin.renderZone(rzSource(300), rzHost, {});
@@ -527,37 +513,15 @@ function findTag(el, tag) {
   ok("draw works after same-el re-renders", entryRz.strokes.length === 1);
   ok("newest view wins", plugin.firstConnectedView(entryRz).zoneEl === zoneRz());
 
-  // full resize cycle, twice, with simulated Obsidian re-render between
-  async function resizeCycle(id, dy) {
-    const rz = dotsRz();
-    fire(rz, "pointerdown", pev({ pointerId: id, clientX: 50, clientY: 300 }));
-    fire(rz, "pointermove", pev({ pointerId: id, clientX: 50, clientY: 300 + dy }));
-    fire(rz, "pointerup", pev({ pointerId: id, clientX: 50, clientY: 300 + dy }));
-    await tick(40); // endResize awaits saveEntry + persist
-    // no stroke may leak out of a resize gesture
-    return entryRz.strokes.length;
-  }
-  function obsidianRerender() {
-    // Obsidian rebuilds the block in a fresh container; old DOM detaches.
-    detach(rzHost);
-    rzHost = mkHost();
-    plugin.renderZone(rzSource(Math.round(entryRz.height)), rzHost, {});
-  }
+  // fresh container (Obsidian rebuild): old detaches, draw continues
   const n0 = entryRz.strokes.length;
+  detach(rzHost);
+  rzHost = mkHost();
+  plugin.renderZone(rzSource(300), rzHost, {});
+  ok("old view pruned after detach", Array.from(entryRz.views).filter((v) => v.zoneEl.isConnected).length === 1);
   penStroke(svgRz(), 201, 50, 30);
-  ok("draw before resize 1", entryRz.strokes.length === n0 + 1);
-  const sAfterR1 = await resizeCycle(202, 25);
-  ok("resize 1 leaks no stroke", sAfterR1 === n0 + 1);
-  ok("resize 1 persists height", files["note-rz.md"].includes(`height: ${Math.round(entryRz.height)}`));
-  obsidianRerender();
-  penStroke(svgRz(), 203, 50, 30);
-  ok("draw works after resize 1 + re-render", entryRz.strokes.length === n0 + 2);
-  const sAfterR2 = await resizeCycle(204, 25);
-  ok("resize 2 leaks no stroke", sAfterR2 === n0 + 2);
-  obsidianRerender();
-  penStroke(svgRz(), 205, 50, 30);
-  ok("draw works after resize 2 + re-render (the reported bug)", entryRz.strokes.length === n0 + 3);
-  ok("one live view after cycles", Array.from(entryRz.views).filter((v) => v.zoneEl.isConnected).length === 1);
+  ok("draw works after fresh-el re-render", entryRz.strokes.length === n0 + 1);
+  ok("no resize handle rendered", findKids(rzHost, "pz-resize").length === 0);
 
   // reading mode (no editor) persists through the vault
   mockView = { getMode: () => "preview", containerEl: { querySelector: () => null }, editor: undefined };
