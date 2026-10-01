@@ -1,0 +1,198 @@
+/* Pencil Zones — styles (theme-aware: adapts to light/dark automatically) */
+
+.pz-zone {
+  position: relative;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-primary);
+  overflow: hidden;
+  margin: 8px 0;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.pz-zone.pz-active {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -2px;
+}
+
+.pz-zone.pz-moving {
+  opacity: 0.65;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+
+/* While a zone is being moved: no callouts / selection anywhere */
+body.pz-moving-active,
+body.pz-moving-active * {
+  -webkit-touch-callout: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+.pz-zone svg.pz-canvas {
+  display: block;
+  width: 100%;
+  background: transparent;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+/* Dynamic ink: black on light theme, white on dark theme */
+.pz-canvas .pz-ink {
+  stroke: #000000;
+}
+.theme-dark .pz-canvas .pz-ink {
+  stroke: #ffffff;
+}
+
+/* Ruled lines adapt too */
+.pz-canvas .pz-rule {
+  stroke: #e4e4e4;
+}
+.theme-dark .pz-canvas .pz-rule {
+  stroke: #3a3a3f;
+}
+
+/* One global toolbar: grip on top, two columns below (colors | tools).
+   JS positions it; it snaps to the left or right side only. */
+.pz-global {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 8px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 18px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  z-index: 1000;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.pz-global.pz-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+}
+
+/* Top drag strip: grab here to move the panel (releases snap to a side) */
+.pz-grip {
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 1px;
+  color: var(--text-faint);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pz-grip.pz-grabbing {
+  cursor: grabbing;
+  color: var(--text-muted);
+}
+
+.pz-global .pz-body {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.pz-global .pz-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+}
+
+.pz-global .pz-btn {
+  border: none;
+  background: transparent;
+  font-size: 21px;
+  line-height: 1;
+  width: 35px;
+  height: 35px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--text-normal);
+}
+
+.pz-global .pz-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.pz-global .pz-btn.pz-active {
+  background: var(--interactive-accent);
+}
+
+/* Solid color squares (not emoji) */
+.pz-global .pz-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  flex: none;
+}
+
+/* Dynamic ink swatch: shifts with the theme, like the strokes */
+.pz-global .pz-swatch.pz-dynamic {
+  background: #000000;
+}
+.theme-dark .pz-global .pz-swatch.pz-dynamic {
+  background: #ffffff;
+}
+
+/* Drop cursor: blinking text-caret preview of the move landing spot */
+.pz-drop-cursor {
+  position: fixed;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--interactive-accent);
+  z-index: 2000;
+  pointer-events: none;
+  animation: pz-blink 1s steps(2, start) infinite;
+}
+
+@keyframes pz-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.pz-resize {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background-secondary);
+  border-top: 1px solid var(--background-modifier-border);
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pz-resize .pz-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #9a9a9e;
+  margin: 0 2px;
+  flex: none;
+}
