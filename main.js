@@ -5,9 +5,10 @@
  * - Canvas background is transparent: the Obsidian light/dark theme shows
  *   through, live and (via prefers-color-scheme) in static embeds too.
  * - Ink color "dynamic": black on light theme, white on dark theme.
- * - ONE global toolbar: bottom-right by default, draggable by the top grip
- *   strip, snaps to the nearest side (left/right) on release. Two columns
- *   (colors | tools). Only shown when the current note has a drawing zone.
+ * - ONE global toolbar: bottom-right by default, moved by finger
+ *   touch-and-slide anywhere on its background; snaps to the nearest
+ *   side (left/right) on release. Two columns (colors | tools). Only
+ *   shown when the current note has a drawing zone.
  * - Only pen + mouse draw. Fingers never draw.
  * - Single tap with 2 fingers = undo, single tap with 3 fingers = redo,
  *   via document-level Touch Events. Plus "Undo stroke" / "Redo stroke".
@@ -836,60 +837,90 @@ class PencilZonesPlugin extends Plugin {
       if (bar.parentNode) bar.parentNode.removeChild(bar);
     });
 
-    // Grip strip at the top: drag the panel, release snaps to a side.
+    // Panel drag: any FINGER touch-and-slide on the panel background moves
+    // it (buttons handle their own taps). Release snaps to a side.
     // Sliding toward a side docks there (like the iPadOS drawing toolbar):
     // fling direction wins, otherwise the nearest side wins.
-    const grip = bar.createDiv({ cls: "pz-grip" });
-    for (let i = 0; i < 3; i++) grip.createSpan({ cls: "pz-dot" });
-    grip.addEventListener("pointerdown", (e) => {
+    let barTouch = null; // {id, sx, sy, dx, dy, samples, dragging}
+    let barSuppressClick = false;
+    const BAR_DRAG_TOL = 8; // px before a touch becomes a drag
+    bar.addEventListener(
+      "click",
+      (e) => {
+        if (barSuppressClick) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      },
+      true
+    );
+    bar.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "touch") return;
+      if (e.target && e.target.closest && e.target.closest(".pz-btn")) return;
+      if (barTouch) return; // one drag at a time
       e.preventDefault();
       e.stopPropagation();
       const r = bar.getBoundingClientRect();
-      grip._dx = e.clientX - r.left;
-      grip._dy = e.clientY - r.top;
-      grip._drag = true;
-      grip._samples = [{ x: e.clientX, t: Date.now() }];
-      bar.classList.remove("pz-snapping");
-      grip.classList.add("pz-grabbing");
+      barTouch = {
+        id: e.pointerId,
+        sx: e.clientX,
+        sy: e.clientY,
+        dx: e.clientX - r.left,
+        dy: e.clientY - r.top,
+        samples: [{ x: e.clientX, t: Date.now() }],
+        dragging: false,
+      };
       try {
-        grip.setPointerCapture(e.pointerId);
+        bar.setPointerCapture(e.pointerId);
       } catch (_) {}
     });
-    grip.addEventListener("pointermove", (e) => {
-      if (!grip._drag) return;
+    bar.addEventListener("pointermove", (e) => {
+      if (!barTouch || e.pointerId !== barTouch.id) return;
       e.preventDefault();
       const now = Date.now();
-      grip._samples.push({ x: e.clientX, t: now });
-      while (grip._samples.length > 2 && now - grip._samples[0].t > 150) grip._samples.shift();
+      barTouch.samples.push({ x: e.clientX, t: now });
+      while (barTouch.samples.length > 2 && now - barTouch.samples[0].t > 150) barTouch.samples.shift();
+      if (!barTouch.dragging) {
+        const ddx = e.clientX - barTouch.sx;
+        const ddy = e.clientY - barTouch.sy;
+        if (ddx * ddx + ddy * ddy < BAR_DRAG_TOL * BAR_DRAG_TOL) return;
+        barTouch.dragging = true;
+        bar.classList.remove("pz-snapping");
+        barSuppressClick = true; // a drag is not a tap: swallow the click
+      }
       const m = plugin.dockMetrics();
       if (!m) return;
       const left = Math.max(
         m.area.left - m.w + 40,
-        Math.min(e.clientX - (grip._dx || 0), m.area.right - 40)
+        Math.min(e.clientX - barTouch.dx, m.area.right - 40)
       );
       const top = Math.max(
         m.area.top + 8,
-        Math.min(e.clientY - (grip._dy || 0), Math.max(m.area.top + 8, m.area.bottom - m.h - 8))
+        Math.min(e.clientY - barTouch.dy, Math.max(m.area.top + 8, m.area.bottom - m.h - 8))
       );
       bar.style.left = Math.round(left) + "px";
       bar.style.top = Math.round(top) + "px";
       bar.style.right = "auto";
       bar.style.bottom = "auto";
     });
-    const endDrag = (e) => {
-      if (!grip._drag) return;
-      grip._drag = false;
-      grip.classList.remove("pz-grabbing");
+    const endBarDrag = (e) => {
+      if (!barTouch || (e.pointerId !== undefined && e.pointerId !== barTouch.id)) return;
+      const wasDrag = barTouch.dragging;
+      const samples = barTouch.samples || [];
+      barTouch = null;
       try {
-        grip.releasePointerCapture(e.pointerId);
+        if (e.pointerId !== undefined) bar.releasePointerCapture(e.pointerId);
       } catch (_) {}
+      setTimeout(() => {
+        barSuppressClick = false;
+      }, 300);
+      if (!wasDrag) return; // plain tap: buttons already handled it
       // Direction wins over position: a leftward slide docks left even if
       // released right of center (and vice versa).
       let vx = 0;
-      const s = grip._samples || [];
-      if (s.length >= 2) {
-        const dt = s[s.length - 1].t - s[0].t;
-        const dx = s[s.length - 1].x - s[0].x;
+      if (samples.length >= 2) {
+        const dt = samples[samples.length - 1].t - samples[0].t;
+        const dx = samples[samples.length - 1].x - samples[0].x;
         if (dt > 0) vx = dx / dt;
         else if (dx !== 0) vx = dx > 0 ? Infinity : -Infinity;
       }
@@ -902,9 +933,9 @@ class PencilZonesPlugin extends Plugin {
       setTimeout(() => bar.classList.remove("pz-snapping"), 350);
       plugin.saveDock(side, r.top).then(() => plugin.applyDock());
     };
-    grip.addEventListener("pointerup", endDrag);
-    grip.addEventListener("pointercancel", endDrag);
-    grip.addEventListener("contextmenu", (e) => {
+    bar.addEventListener("pointerup", endBarDrag);
+    bar.addEventListener("pointercancel", endBarDrag);
+    bar.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
     });

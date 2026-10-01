@@ -20,7 +20,7 @@ Inline Apple Pencil drawing zones for Obsidian. No build step: `main.js` + `styl
 
 One floating panel controls every zone. It only appears when the current note has a drawing zone and hides while typing.
 
-- Drag it by the three-dot grip on top. It lives on the left or right side only: release (or fling) toward a side and it glides there, like the iPadOS drawing toolbar. Position is remembered.
+- Drag it with a finger swipe anywhere on its background. It lives on the left or right side only: release (or fling) toward a side and it glides there, like the iPadOS drawing toolbar. Position is remembered.
 - Left column: colors. Right column: tools + lines.
 
 ## Gestures & moving

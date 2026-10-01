@@ -1,7 +1,7 @@
 {
 	"id": "pencil-zones",
 	"name": "Pencil Zones",
-	"version": "0.6.1",
+	"version": "0.6.2",
 	"minAppVersion": "1.7.2",
 	"description": "Inline Apple Pencil drawing zones stored as SVG. Two-finger tap undo, three-finger tap redo.",
 	"author": "you",
