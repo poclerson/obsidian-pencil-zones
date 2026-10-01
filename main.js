@@ -1,4 +1,4 @@
-/* Pencil Zones v0.8.1 — plain-JS Obsidian plugin (no build step).
+/* Pencil Zones v0.8.2 — plain-JS Obsidian plugin (no build step).
  *
  * - Command "Insert drawing zone" creates a resizable inline canvas.
  * - Strokes saved as standalone SVG in a configurable root folder.
@@ -1632,7 +1632,7 @@ class PencilZonesPlugin extends Plugin {
     const src = this.svgPath((params.src || "").trim());
     let height = parseInt(params.height || "", 10);
     if (!Number.isFinite(height) || height <= 0) height = this.settings.defaultHeight || 300;
-    height = Math.min(1200, Math.max(150, height));
+    height = Math.min(4000, Math.max(150, height));
     const showLines = params.lines != null ? parseLinesFlag(params.lines) : !!this.settings.defaultLines;
 
     if (!src) {
@@ -1855,7 +1855,7 @@ class PencilZonesPlugin extends Plugin {
       e.preventDefault();
       const r = svg.getBoundingClientRect();
       const scale = entry.height / Math.max(1, r.height);
-      entry.height = Math.min(1200, Math.max(150, resizeStartH + (e.clientY - resizeStartY) * scale));
+      entry.height = Math.min(4000, Math.max(150, resizeStartH + (e.clientY - resizeStartY) * scale));
       render();
     });
     async function endResize(e) {
@@ -1899,7 +1899,7 @@ class PencilZonesSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Default height")
-      .setDesc("Height in px for new drawing zones (150–1200, draggable later).")
+      .setDesc("Height in px for new drawing zones (150–4000, draggable later).")
       .addText((t) =>
         t
           .setPlaceholder("300")
@@ -1907,7 +1907,7 @@ class PencilZonesSettingTab extends PluginSettingTab {
           .onChange(async (v) => {
             const n = parseInt(v, 10);
             if (Number.isFinite(n)) {
-              this.plugin.settings.defaultHeight = Math.min(1200, Math.max(150, n));
+              this.plugin.settings.defaultHeight = Math.min(4000, Math.max(150, n));
               await this.plugin.saveSettings();
             }
           })
