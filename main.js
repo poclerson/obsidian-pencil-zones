@@ -1,9 +1,11 @@
-/* Pencil Zones v0.8.0 — plain-JS Obsidian plugin (no build step).
+/* Pencil Zones v0.8.1 — plain-JS Obsidian plugin (no build step).
  *
  * - Command "Insert drawing zone" creates a resizable inline canvas.
  * - Strokes saved as standalone SVG in a configurable root folder.
  * - Canvas background is transparent: the Obsidian light/dark theme shows
  *   through, live and (via prefers-color-scheme) in static embeds too.
+ * - Canvas keeps the viewBox aspect (aspect-ratio + preserveAspectRatio
+ *   none), so ink always lands exactly under the pencil.
  * - Ink color "dynamic": black on light theme, white on dark theme.
  * - ONE global toolbar: bottom-right by default, moved by finger
  *   touch-and-slide anywhere on its background; snaps to the nearest
@@ -17,10 +19,8 @@
  * - All stroke input is document-delegated through one global draw
  *   state, so Live Preview re-renders (e.g. after resize) can never
  *   strand input listeners.
- * - Pinch in/out resizes the active tool (per tool, per zone, saved in
- *   the SVG, no on-screen indicator). Small drifts still count as taps.
  * - Tools: pencil, highlighter, object eraser, pixel eraser.
- * - Default widths: pencil 2, highlighter 28 @ 0.35. No width selector.
+ * - Fixed widths: pencil 2, highlighter 28 @ 0.35. No width selector.
  * - Optional ruled lines per zone (toggle in toolbar, persisted).
  */
 
@@ -39,40 +39,13 @@ const COLORS = [
   { hex: "#1E88E5", name: "blue" },
 ];
 
-// Hardcoded default widths (no UI selector per spec); pinch adjusts per zone.
+// Fixed widths (no UI, no gesture to change them).
 const WIDTH_PENCIL = 2;
 const WIDTH_HIGHLIGHT = 28;
 const OPACITY_HIGHLIGHT = 0.35;
 const ERASER_RADIUS = 14; // svg units hit-test radius (object eraser)
 const PIXEL_ERASER_RADIUS = 10; // svg units radius (pixel eraser)
 const LINE_SPACING = 32;
-
-const DEFAULT_SIZES = {
-  pencil: WIDTH_PENCIL,
-  highlighter: WIDTH_HIGHLIGHT,
-  eraser: ERASER_RADIUS,
-  pxeraser: PIXEL_ERASER_RADIUS,
-};
-const SIZE_LIMITS = {
-  pencil: [0.5, 12],
-  highlighter: [2, 80],
-  eraser: [4, 48],
-  pxeraser: [2, 48],
-};
-
-function sanitizeSizes(s) {
-  const out = {};
-  for (const k of Object.keys(DEFAULT_SIZES)) {
-    const v = s && typeof s[k] === "number" ? s[k] : DEFAULT_SIZES[k];
-    const lim = SIZE_LIMITS[k];
-    out[k] = Math.min(lim[1], Math.max(lim[0], v));
-  }
-  return out;
-}
-
-// Pinch-to-size tuning
-const PINCH_MIN_DIST = 20; // ignore pinches that start with fingers this close (svg units of px distance)
-const PINCH_ENGAGE = 12; // px of separation change before sizing engages
 
 // 2/3-finger tap gesture tuning
 const TAP_MAX_MS = 800;
@@ -139,18 +112,16 @@ function isBlackHex(c) {
   return typeof c === "string" && /^#0{3}([0]{3})?$/i.test(c.trim());
 }
 
-function strokeWidthFor(stroke, sizes) {
-  // Per-stroke width wins (set at draw time); otherwise fall back to the
-  // zone's current size for that tool (legacy strokes).
+function strokeWidthFor(stroke) {
+  // Strokes written while tool sizing existed keep their stored width;
+  // everything else uses the fixed widths. There is no UI to change them.
   if (stroke && typeof stroke.width === "number" && Number.isFinite(stroke.width)) return stroke.width;
-  const s = sizes || DEFAULT_SIZES;
-  if (stroke && stroke.tool === "highlighter") return s.highlighter;
-  return s.pencil;
+  if (stroke && stroke.tool === "highlighter") return WIDTH_HIGHLIGHT;
+  return WIDTH_PENCIL;
 }
 
-function eraserRadiusFor(sizes, pixel) {
-  const s = sizes || DEFAULT_SIZES;
-  return pixel ? s.pxeraser : s.eraser;
+function eraserRadiusFor(pixel) {
+  return pixel ? PIXEL_ERASER_RADIUS : ERASER_RADIUS;
 }
 
 function strokeOpacityFor(stroke) {
@@ -191,20 +162,19 @@ function themedStyleBlock() {
   );
 }
 
-function buildSVG(strokes, w, h, showLines, sizes) {
-  const sz = sanitizeSizes(sizes);
+function buildSVG(strokes, w, h, showLines) {
   const paths = strokes
     .map((s) => {
       const d = pathD(s.points);
       if (!d) return "";
-      const width = strokeWidthFor(s, sz);
+      const width = strokeWidthFor(s);
       const opacity = strokeOpacityFor(s);
       const colorAttr = isDynamicColor(s.color) ? ` class="pz-ink"` : ` stroke="${s.color}"`;
       return `  <path d="${d}"${colorAttr} fill="none" stroke-width="${width}" stroke-opacity="${opacity}" stroke-linecap="round" stroke-linejoin="round"/>`;
     })
     .join("\n");
   const needsTheme = showLines || strokes.some((s) => isDynamicColor(s.color));
-  const data = JSON.stringify({ version: 4, width: w, lines: !!showLines, sizes: sz, strokes });
+  const data = JSON.stringify({ version: 5, width: w, lines: !!showLines, strokes });
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">\n` +
     (needsTheme ? themedStyleBlock() : "") +
@@ -215,7 +185,7 @@ function buildSVG(strokes, w, h, showLines, sizes) {
 }
 
 function extractData(svgText) {
-  const fallback = { strokes: [], lines: false, sizes: null };
+  const fallback = { strokes: [], lines: false };
   if (!svgText) return fallback;
   const m = svgText.match(/<desc id="pz-data">(.*?)<\/desc>/s);
   if (!m) return fallback;
@@ -224,8 +194,7 @@ function extractData(svgText) {
     const data = JSON.parse(json);
     const strokes = Array.isArray(data) ? data : Array.isArray(data.strokes) ? data.strokes : [];
     const lines = !Array.isArray(data) && !!data.lines;
-    const sizes = !Array.isArray(data) && data.sizes ? sanitizeSizes(data.sizes) : null;
-    return { strokes: strokes.filter((s) => s && Array.isArray(s.points)), lines, sizes };
+    return { strokes: strokes.filter((s) => s && Array.isArray(s.points)), lines };
   } catch (e) {
     return fallback;
   }
@@ -475,7 +444,7 @@ class PencilZonesPlugin extends Plugin {
 
     try {
       const exists = await this.app.vault.adapter.exists(rel);
-      if (!exists) await this.app.vault.create(rel, buildSVG([], CANVAS_W, height, showLines, DEFAULT_SIZES));
+      if (!exists) await this.app.vault.create(rel, buildSVG([], CANVAS_W, height, showLines));
     } catch (e) {
       console.warn("Pencil Zones: could not create SVG", e);
     }
@@ -545,7 +514,6 @@ class PencilZonesPlugin extends Plugin {
         redo: [],
         height,
         lines: showLines,
-        sizes: sanitizeSizes(null),
         views: new Set(),
         saveTimer: null,
         loadStarted: false,
@@ -572,18 +540,11 @@ class PencilZonesPlugin extends Plugin {
       if (!exists) return;
       const text = await this.app.vault.adapter.read(entry.src);
       const data = extractData(text);
-      if (data.sizes) entry.sizes = sanitizeSizes(data.sizes);
       if (data.strokes.length) {
         // Legacy black (#000000) becomes dynamic ink: identical on light
         // theme, visible (white) on dark theme.
-        // Widthless strokes (pre-width format) are backfilled with the
-        // zone's loaded sizes, freezing exactly what is on screen: later
-        // pinches only affect new strokes.
         for (const s of data.strokes) {
           if (isBlackHex(s.color)) s.color = DYNAMIC_INK;
-          if (typeof s.width !== "number" || !Number.isFinite(s.width) || s.width <= 0 || s.width > 200) {
-            s.width = strokeWidthFor({ tool: s.tool }, entry.sizes);
-          }
         }
         entry.strokes = data.strokes;
         this.renderEntryViews(entry);
@@ -631,7 +592,7 @@ class PencilZonesPlugin extends Plugin {
       entry.saveTimer = null;
     }
     try {
-      const text = buildSVG(entry.strokes, CANVAS_W, Math.round(entry.height), entry.lines, entry.sizes);
+      const text = buildSVG(entry.strokes, CANVAS_W, Math.round(entry.height), entry.lines);
       const adapter = this.app.vault.adapter;
       const exists = await adapter.exists(entry.src);
       if (exists) await adapter.write(entry.src, text);
@@ -756,7 +717,6 @@ class PencilZonesPlugin extends Plugin {
         points: [pt],
         color: this.color,
         tool: this.tool,
-        width: (entry.sizes || DEFAULT_SIZES)[this.tool],
       };
       const pathEl = document.createElementNS("http://www.w3.org/2000/svg", "path");
       pathEl.setAttribute("fill", "none");
@@ -834,7 +794,7 @@ class PencilZonesPlugin extends Plugin {
     d.pathEl.setAttribute("d", pathD(d.stroke.points));
     if (isDynamicColor(d.stroke.color)) d.pathEl.setAttribute("class", "pz-ink");
     else d.pathEl.setAttribute("stroke", d.stroke.color);
-    d.pathEl.setAttribute("stroke-width", String(strokeWidthFor(d.stroke, entry.sizes)));
+    d.pathEl.setAttribute("stroke-width", String(strokeWidthFor(d.stroke)));
     d.pathEl.setAttribute("stroke-opacity", String(strokeOpacityFor(d.stroke)));
   }
 
@@ -879,7 +839,7 @@ class PencilZonesPlugin extends Plugin {
 
   // ---------- 2-finger undo / 3-finger redo (document-level Touch Events) ----------
 
-  // Zone under a viewport point (for gestures + pinch targeting).
+  // Zone under a viewport point (for gesture targeting).
   entryAtPoint(x, y) {
     try {
       const hit = document.elementFromPoint(x, y);
@@ -892,26 +852,13 @@ class PencilZonesPlugin extends Plugin {
 
   trackFingerGestures() {
     const map = new Map(); // identifier -> {sx, sy, x, y}
-    let session = null; // {ids:Set, start, moved, pinch:{entry, baseDist, tool, baseSize} | null}
-
-    const pinchDist = () => {
-      const ids = Array.from(map.keys());
-      if (ids.length !== 2) return null;
-      const A = map.get(ids[0]);
-      const B = map.get(ids[1]);
-      return {
-        d0: Math.hypot(A.sx - B.sx, A.sy - B.sy),
-        d: Math.hypot(A.x - B.x, A.y - B.y),
-        mx: (A.x + B.x) / 2,
-        my: (A.y + B.y) / 2,
-      };
-    };
+    let session = null; // {ids:Set, start, moved}
 
     const onStart = (e) => {
       if (this.moveMode || !e.changedTouches) return;
       for (const t of Array.from(e.changedTouches)) {
         map.set(t.identifier, { sx: t.clientX, sy: t.clientY, x: t.clientX, y: t.clientY });
-        if (!session) session = { ids: new Set(), start: Date.now(), moved: false, pinch: null };
+        if (!session) session = { ids: new Set(), start: Date.now(), moved: false };
         session.ids.add(t.identifier);
       }
       // Multi-touch cancels any in-progress stroke so gestures never draw.
@@ -934,45 +881,6 @@ class PencilZonesPlugin extends Plugin {
           if (dx * dx + dy * dy > TAP_MAX_MOVE * TAP_MAX_MOVE) session.moved = true;
         }
       }
-      // Pinch-to-size: exactly 2 touches whose separation changes.
-      // Engaging (or moving during) a pinch disqualifies the tap gesture.
-      if (map.size !== 2 || session.ids.size !== 2) {
-        if (session.pinch) {
-          session.pinch = null;
-          session.moved = true;
-        }
-        return;
-      }
-      const pd = pinchDist();
-      if (!pd) return;
-      if (!session.pinch) {
-        if (pd.d0 < PINCH_MIN_DIST || Math.abs(pd.d - pd.d0) < PINCH_ENGAGE) return;
-        const entry = this.entryAtPoint(pd.mx, pd.my) || this.activeEntry();
-        if (!entry) {
-          session.pinch = { none: true };
-        } else {
-          const tool = this.tool;
-          session.pinch = {
-            entry,
-            baseDist: pd.d,
-            tool,
-            baseSize: (entry.sizes || DEFAULT_SIZES)[tool],
-          };
-          this.dlog("pinch-start", tool + " base=" + session.pinch.baseSize + " src=" + entry.src);
-        }
-        session.moved = true;
-        return;
-      }
-      if (session.pinch.none) return;
-      const p = session.pinch;
-      if (!this.entries.has(p.entry.src)) {
-        session.pinch = null;
-        return;
-      }
-      const lim = SIZE_LIMITS[p.tool] || [1, 32];
-      const size = Math.min(lim[1], Math.max(lim[0], (p.baseSize * pd.d) / p.baseDist));
-      p.entry.sizes[p.tool] = Math.round(size * 2) / 2;
-      this.renderEntryViews(p.entry);
     };
 
     const onEnd = (e, isCancel) => {
@@ -990,14 +898,6 @@ class PencilZonesPlugin extends Plugin {
       if (remaining !== 0 || !session) return;
       const s = session;
       session = null;
-      if (s.pinch) {
-        // A pinch is a sizing gesture, never a tap: just persist the sizes.
-        if (!s.pinch.none) {
-          this.dlog("pinch-end", s.pinch.tool + " size=" + s.pinch.entry.sizes[s.pinch.tool]);
-          this.scheduleSave(s.pinch.entry);
-        }
-        return;
-      }
       const dt = Date.now() - s.start;
       const n = s.ids.size;
       if (s.moved || dt > TAP_MAX_MS || (n !== 2 && n !== 3)) {
@@ -1351,11 +1251,12 @@ class PencilZonesPlugin extends Plugin {
     return null;
   }
 
-  // Walk up to find the enclosing drawing zone.
+  // Walk up to find the enclosing drawing zone (stops at resize handle).
   zoneOf(node) {
     let n = node;
     while (n && n !== document.body) {
       if (n.classList) {
+        if (n.classList.contains("pz-resize")) return null;
         if (n.classList.contains("pz-zone")) return n;
       }
       n = n.parentNode;
@@ -1797,7 +1698,7 @@ class PencilZonesPlugin extends Plugin {
         if (isDynamicColor(s.color)) p.setAttribute("class", "pz-ink");
         else p.setAttribute("stroke", s.color || "#000000");
         p.setAttribute("fill", "none");
-        p.setAttribute("stroke-width", String(strokeWidthFor(s, entry.sizes)));
+        p.setAttribute("stroke-width", String(strokeWidthFor(s)));
         p.setAttribute("stroke-opacity", String(strokeOpacityFor(s)));
         p.setAttribute("stroke-linecap", "round");
         p.setAttribute("stroke-linejoin", "round");
@@ -1823,7 +1724,7 @@ class PencilZonesPlugin extends Plugin {
         for (const p of s.points) {
           const dx = p.x - pt.x;
           const dy = p.y - pt.y;
-          const pad = strokeWidthFor(s, entry.sizes) / 2 + eraserRadiusFor(entry.sizes, false);
+          const pad = strokeWidthFor(s) / 2 + eraserRadiusFor(false);
           if (dx * dx + dy * dy <= pad * pad) {
             hit = true;
             break;
@@ -1842,7 +1743,7 @@ class PencilZonesPlugin extends Plugin {
     // Pixel eraser: removes only points inside the round section,
     // splitting strokes into surviving segments.
     function pixelEraseAt(pt) {
-      const radius = eraserRadiusFor(entry.sizes, true);
+      const radius = eraserRadiusFor(true);
       const R2 = radius * radius;
       let changed = false;
       const next = [];
@@ -1881,7 +1782,7 @@ class PencilZonesPlugin extends Plugin {
     function ensureRing() {
       if (ring && ring.isConnected) return ring;
       ring = document.createElementNS(SVGNS, "circle");
-      ring.setAttribute("r", String(eraserRadiusFor(entry.sizes, true)));
+      ring.setAttribute("r", String(eraserRadiusFor(true)));
       ring.setAttribute("fill", "none");
       ring.setAttribute("stroke", "#999999");
       ring.setAttribute("stroke-width", "1.5");
@@ -1920,13 +1821,55 @@ class PencilZonesPlugin extends Plugin {
     render();
     plugin.updateToolbarVisibility();
 
-    // Stroke input is document-delegated (setupDrawInput); no per-element
-    // input listeners here, so re-renders can never strand input.
+    // Stroke input is document-delegated (setupDrawInput); nothing
+    // per-element here except the resize handle, so re-renders can never
+    // strand input listeners.
 
     // Prevent iPad pinch-zoom / callout interference inside the zone.
     zone.addEventListener("gesturestart", (e) => e.preventDefault());
     zone.addEventListener("dblclick", (e) => e.preventDefault());
-    zone.addEventListener("contextmenu", (e) => e.preventDefault());
+    zone.addEventListener("contextmenu", (e) => {
+      if (e.target.closest && e.target.closest(".pz-resize")) return;
+      e.preventDefault();
+    });
+
+    // ---- resize handle (drag the three dots at the bottom edge) ----
+    const resize = zone.createDiv({ cls: "pz-resize" });
+    for (let i = 0; i < 3; i++) resize.createSpan({ cls: "pz-dot" });
+    let resizing = false;
+    let resizeStartY = 0;
+    let resizeStartH = 0;
+    resize.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      plugin.setActive(entry.src);
+      resizing = true;
+      resizeStartY = e.clientY;
+      resizeStartH = entry.height;
+      try {
+        resize.setPointerCapture(e.pointerId);
+      } catch (_) {}
+    });
+    resize.addEventListener("pointermove", (e) => {
+      if (!resizing) return;
+      e.preventDefault();
+      const r = svg.getBoundingClientRect();
+      const scale = entry.height / Math.max(1, r.height);
+      entry.height = Math.min(1200, Math.max(150, resizeStartH + (e.clientY - resizeStartY) * scale));
+      render();
+    });
+    async function endResize(e) {
+      if (!resizing) return;
+      resizing = false;
+      try {
+        resize.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+      render();
+      await plugin.saveEntry(entry);
+      plugin.persistBlockParams(entry.src, { height: entry.height });
+    }
+    resize.addEventListener("pointerup", endResize);
+    resize.addEventListener("pointercancel", endResize);
   }
 }
 
@@ -2006,6 +1949,4 @@ PencilZonesPlugin._test = {
   isBlackHex,
   splitBlocks,
   lineStartsOf,
-  sanitizeSizes,
-  DEFAULT_SIZES,
 };

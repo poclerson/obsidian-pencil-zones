@@ -209,17 +209,10 @@ function findTag(el, tag) {
   const legacyEntry = plugin.entries.get("test/legacy.svg");
   ok("legacy black migrated", legacyEntry.strokes[0].color === "dynamic");
   ok("legacy red untouched", legacyEntry.strokes[1].color === "#E53935");
-  ok("legacy strokes backfilled with defaults", legacyEntry.strokes.every((s) => s.width === 2));
-  // v3 file: sizes present but strokes widthless -> backfilled with zone sizes
-  files["test/sized.svg"] = T.buildSVG(
-    [{ points: [{ x: 1, y: 1 }, { x: 5, y: 5 }], color: "#000000", tool: "pencil" }],
-    800, 300, false,
-    { pencil: 6, highlighter: 28, eraser: 14, pxeraser: 10 });
-  const hostS = mkHost();
-  plugin.renderZone("src: test/sized.svg\nheight: 300", hostS, {});
-  await new Promise((r) => setTimeout(r, 50));
-  const sizedEntry = plugin.entries.get("test/sized.svg");
-  ok("widthless strokes freeze zone sizes", sizedEntry.strokes[0].width === 6 && sizedEntry.strokes[0].color === "dynamic");
+  ok("legacy strokes render at default width", (() => {
+    const g = findTag(host0, "g");
+    return !!g && g.children.every((c) => c.attrs["stroke-width"] === "2");
+  })());
   const g0 = findTag(host0, "g");
   ok("live dynamic path uses class", g0 && g0.children[0].attrs.class === "pz-ink");
 
@@ -415,69 +408,55 @@ function findTag(el, tag) {
   fire(svgR2, "pointerup", pev({ pointerId: 90 }));
   ok("drawing works after re-render", entryR.strokes.length === beforeRe + 1);
 
-  // ---- pinch to size ----
+  // ---- canvas resize handle ----
   plugin.tool = "pencil";
   const hostP = mkHost();
   plugin.renderZone("src: test/pinch.svg\nheight: 300", hostP, {});
   const zoneP = findKids(hostP, "pz-zone")[0];
   const svgP = zoneP.children.find((c) => c.tag === "svg");
   const entryP = plugin.entries.get("test/pinch.svg");
-  fakeDoc.elementFromPoint = () => ({ closest: (sel) => (sel === ".pz-zone" ? zoneP : null) });
-  fire(svgP, "pointerdown", pev({ pointerId: 80, clientX: 50, clientY: 30 }));
-  fire(svgP, "pointermove", pev({ pointerId: 80, clientX: 60, clientY: 35 }));
-  fire(svgP, "pointerup", pev({ pointerId: 80 }));
-  const undoDepthP = entryP.undo.length;
-  ok("new stroke stores current width", entryP.strokes[0].width === 2);
-
-  // pinch out: d0=100, engage at 160, grow to 200 => 2 * 200/160 = 2.5
-  fire(fakeDoc, "touchstart", { touches: [touch(90, 100, 200)], changedTouches: [touch(90, 100, 200)] });
-  fire(fakeDoc, "touchstart", { touches: [touch(90, 100, 200), touch(91, 200, 200)], changedTouches: [touch(91, 200, 200)] });
-  fire(fakeDoc, "touchmove", { touches: [touch(90, 100, 200), touch(91, 260, 200)], changedTouches: [touch(91, 260, 200)] });
-  fire(fakeDoc, "touchmove", { touches: [touch(90, 100, 200), touch(91, 300, 200)], changedTouches: [touch(91, 300, 200)] });
-  ok("pinch out grows pencil", entryP.sizes.pencil === 2.5);
-  fire(fakeDoc, "touchend", { touches: [touch(91, 300, 200)], changedTouches: [touch(90, 100, 200)] });
-  fire(fakeDoc, "touchend", { touches: [], changedTouches: [touch(91, 300, 200)] });
-  ok("pinch lift fires no undo", entryP.strokes.length === 1 && entryP.undo.length === undoDepthP);
-  // draw AFTER the pinch: old stroke keeps 2, new one takes 2.5
-  fire(svgP, "pointerdown", pev({ pointerId: 81, clientX: 50, clientY: 60 }));
-  fire(svgP, "pointermove", pev({ pointerId: 81, clientX: 60, clientY: 65 }));
-  fire(svgP, "pointerup", pev({ pointerId: 81 }));
-  ok("pinch affects future strokes only", entryP.strokes[0].width === 2 && entryP.strokes[1].width === 2.5);
-  const gP = findTag(hostP, "g");
-  const pw = gP ? gP.children.map((c) => c.attrs["stroke-width"]) : [];
-  ok("rendered paths keep per-stroke widths", pw[0] === "2" && pw[1] === "2.5");
-  await new Promise((r) => setTimeout(r, 700));
-  ok("pinched size persists to SVG", T.extractData(files["test/pinch.svg"]).sizes.pencil === 2.5);
-
-  // pinch on pixel eraser resizes its radius: d0=200, engage at 160, shrink to 120 => 7.5
-  plugin.tool = "pxeraser";
-  fire(fakeDoc, "touchstart", { touches: [touch(92, 100, 200)], changedTouches: [touch(92, 100, 200)] });
-  fire(fakeDoc, "touchstart", { touches: [touch(92, 100, 200), touch(93, 300, 200)], changedTouches: [touch(93, 300, 200)] });
-  fire(fakeDoc, "touchmove", { touches: [touch(92, 100, 200), touch(93, 260, 200)], changedTouches: [touch(93, 260, 200)] });
-  fire(fakeDoc, "touchmove", { touches: [touch(92, 100, 200), touch(93, 220, 200)], changedTouches: [touch(93, 220, 200)] });
-  fire(fakeDoc, "touchend", { touches: [touch(93, 220, 200)], changedTouches: [touch(92, 100, 200)] });
-  fire(fakeDoc, "touchend", { touches: [], changedTouches: [touch(93, 220, 200)] });
-  ok("pinch resizes pixel eraser", entryP.sizes.pxeraser === 7.5);
-
-  // huge spread clamps pencil at max 12 (current pencil size is 2.5)
-  plugin.tool = "pencil";
-  fire(fakeDoc, "touchstart", { touches: [touch(94, 0, 200)], changedTouches: [touch(94, 0, 200)] });
-  fire(fakeDoc, "touchstart", { touches: [touch(94, 0, 200), touch(95, 100, 200)], changedTouches: [touch(95, 100, 200)] });
-  fire(fakeDoc, "touchmove", { touches: [touch(94, 0, 200), touch(95, 160, 200)], changedTouches: [touch(95, 160, 200)] });
-  fire(fakeDoc, "touchmove", { touches: [touch(94, 0, 200), touch(95, 1000, 200)], changedTouches: [touch(95, 1000, 200)] });
-  fire(fakeDoc, "touchend", { touches: [touch(95, 1000, 200)], changedTouches: [touch(94, 0, 200)] });
-  fire(fakeDoc, "touchend", { touches: [], changedTouches: [touch(95, 1000, 200)] });
-  ok("pinch clamps at max", entryP.sizes.pencil === 12);
-
-  // third finger mid-pinch aborts sizing without side effects
-  fire(fakeDoc, "touchstart", { touches: [touch(96, 100, 200)], changedTouches: [touch(96, 100, 200)] });
-  fire(fakeDoc, "touchstart", { touches: [touch(96, 100, 200), touch(97, 200, 200)], changedTouches: [touch(97, 200, 200)] });
-  fire(fakeDoc, "touchmove", { touches: [touch(96, 100, 200), touch(97, 260, 200)], changedTouches: [touch(97, 260, 200)] });
-  fire(fakeDoc, "touchstart", { touches: [touch(96, 100, 200), touch(97, 260, 200), touch(98, 300, 300)], changedTouches: [touch(98, 300, 300)] });
-  fire(fakeDoc, "touchend", { touches: [touch(97, 260, 200), touch(98, 300, 300)], changedTouches: [touch(96, 100, 200)] });
-  fire(fakeDoc, "touchend", { touches: [touch(98, 300, 300)], changedTouches: [touch(97, 260, 200)] });
-  fire(fakeDoc, "touchend", { touches: [], changedTouches: [touch(98, 300, 300)] });
-  ok("third finger aborts pinch safely", entryP.strokes.length === 2 && entryP.undo.length === undoDepthP + 1);
+  const dotsP = findKids(hostP, "pz-resize")[0];
+  ok("resize handle rendered with three dots", !!dotsP && dotsP.children.length === 3);
+  const tick = (ms) => new Promise((r) => setTimeout(r, ms));
+  mockFile = { path: "note-rz.md" };
+  files["note-rz.md"] = ["# N", "", "```pencil-draw", "src: test/pinch.svg", "height: 300", "lines: false", "```", "", "tail"].join("\n");
+  const mockEditorFor = (path) => {
+    const off = (lines, p) => {
+      let o = 0;
+      for (let i = 0; i < p.line; i++) o += lines[i].length + 1;
+      return o + p.ch;
+    };
+    return {
+      getValue: () => files[path],
+      offsetToPos: (o) => {
+        const before = files[path].slice(0, o).split("\n");
+        return { line: before.length - 1, ch: before[before.length - 1].length };
+      },
+      replaceRange: (txt, from, to) => {
+        const lines = files[path].split("\n");
+        const cur = files[path];
+        files[path] = cur.slice(0, off(lines, from)) + txt + cur.slice(off(lines, to));
+      },
+    };
+  };
+  mockView = { getMode: () => "source", containerEl: { querySelector: () => null }, editor: mockEditorFor("note-rz.md") };
+  const rzStroke = (svg, id, x, y) => {
+    fire(svg, "pointerdown", pev({ pointerId: id, clientX: x, clientY: y }));
+    fire(svg, "pointermove", pev({ pointerId: id, clientX: x + 10, clientY: y + 5 }));
+    fire(svg, "pointerup", pev({ pointerId: id }));
+  };
+  rzStroke(svgP, 80, 50, 30);
+  ok("draw before resize", entryP.strokes.length === 1);
+  const hBefore = entryP.height;
+  fire(dotsP, "pointerdown", pev({ pointerId: 81, clientX: 50, clientY: 300 }));
+  fire(dotsP, "pointermove", pev({ pointerId: 81, clientX: 50, clientY: 340 }));
+  fire(dotsP, "pointerup", pev({ pointerId: 81, clientX: 50, clientY: 340 }));
+  await tick(40);
+  ok("resize drag grows zone", entryP.height > hBefore);
+  ok("resize leaks no stroke", entryP.strokes.length === 1);
+  ok("resize persists height", files["note-rz.md"].includes(`height: ${Math.round(entryP.height)}`));
+  rzStroke(svgP, 82, 50, 30);
+  ok("draw works after resize", entryP.strokes.length === 2);
 
   // ---- re-render lifecycle: no stacking, newest wins, draw survives ----
   mockFile = { path: "note-rz.md" };
@@ -521,7 +500,6 @@ function findTag(el, tag) {
   ok("old view pruned after detach", Array.from(entryRz.views).filter((v) => v.zoneEl.isConnected).length === 1);
   penStroke(svgRz(), 201, 50, 30);
   ok("draw works after fresh-el re-render", entryRz.strokes.length === n0 + 1);
-  ok("no resize handle rendered", findKids(rzHost, "pz-resize").length === 0);
 
   // reading mode (no editor) persists through the vault
   mockView = { getMode: () => "preview", containerEl: { querySelector: () => null }, editor: undefined };

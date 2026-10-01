@@ -26,7 +26,6 @@ One floating panel controls every zone. It only appears when the current note ha
 ## Gestures & moving
 
 - **2-finger tap** = undo, **3-finger tap** = redo (also available as commands for desktop).
-- **Pinch** in/out with two fingers resizes the active tool — per tool, per zone, saved in the SVG. No indicator; strokes re-render live. Small drifts still count as taps. Only new strokes take the size; existing strokes keep theirs (widths are stored per stroke).
 - **Long-press** a zone with one finger to lift it, drag it before/after other content with a blinking caret preview, release to drop. The source is verified before rewriting, so a stale mapping aborts instead of corrupting the note.
 
 ## Storage
@@ -44,6 +43,7 @@ lines: false
 - SVGs live in one configurable root folder (default `_inline_handwriting`), named `{Note}-{timestamp}-{rand}.svg`.
 - Files are transparent (theme shows through) and carry an embedded `prefers-color-scheme` style, so they look right as static embeds too. Editable stroke data rides along in `<desc id="pz-data">`.
 - `height` sets the canvas data height (displayed width is always full-width, aspect preserved so ink lands exactly under the pencil).
+- Resize a zone with the three dots at its bottom; the height is written back to the block.
 
 ## Limits
 

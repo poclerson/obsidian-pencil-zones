@@ -166,3 +166,25 @@ body.pz-moving-active * {
     opacity: 0;
   }
 }
+
+.pz-resize {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background-secondary);
+  border-top: 1px solid var(--background-modifier-border);
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pz-resize .pz-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #9a9a9e;
+  margin: 0 2px;
+  flex: none;
+}
