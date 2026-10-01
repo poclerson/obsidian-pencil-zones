@@ -1,4 +1,4 @@
-/* Pencil Zones v0.7.0 — plain-JS Obsidian plugin (no build step).
+/* Pencil Zones v0.7.2 — plain-JS Obsidian plugin (no build step).
  *
  * - Command "Insert drawing zone" creates a resizable inline canvas.
  * - Strokes saved as standalone SVG in a configurable root folder.
@@ -14,6 +14,9 @@
  *   via document-level Touch Events. Plus "Undo stroke" / "Redo stroke".
  * - Long-press (finger) a zone to move it before/after other content: a
  *   blinking text-cursor previews the landing spot while dragging.
+ * - All stroke input is document-delegated through one global draw
+ *   state, so Live Preview re-renders (e.g. after resize) can never
+ *   strand input listeners.
  * - Pinch in/out resizes the active tool (per tool, per zone, saved in
  *   the SVG, no on-screen indicator). Small drifts still count as taps.
  * - Tools: pencil, highlighter, object eraser, pixel eraser.
@@ -299,6 +302,7 @@ class PencilZonesPlugin extends Plugin {
     this.typingHidden = false;
     this.moveMode = null;
     this.diag = [];
+    this.draw = null; // global in-flight stroke (document-delegated input)
 
     this.addSettingTab(new PencilZonesSettingTab(this.app, this));
 
@@ -346,6 +350,7 @@ class PencilZonesPlugin extends Plugin {
 
     this.buildGlobalToolbar();
     this.buildDropCursor();
+    this.setupDrawInput();
     this.trackFingerGestures();
     this.setupMoveMode();
 
@@ -665,13 +670,155 @@ class PencilZonesPlugin extends Plugin {
   }
 
   cancelAllStrokes() {
-    for (const entry of this.entries.values()) {
-      for (const v of entry.views) {
-        try {
-          if (v.zoneEl.isConnected && v.cancelStroke) v.cancelStroke();
-        } catch (_) {}
+    // Discard any in-flight stroke (multi-touch gesture take-over).
+    this.finalizeDraw(false);
+  }
+
+  // ---------- stroke input (document-level delegation) ----------
+  // All pen/mouse stroke input flows through ONE global draw state via
+  // document listeners. Per-svg listeners used to die or go stale across
+  // Live Preview re-renders (e.g. after a resize rewrites the block),
+  // silently killing all drawing until reload. Delegation is immune:
+  // events bubble from whatever the current canvas is, and a re-render
+  // mid-stroke simply re-attaches the live path in render().
+  setupDrawInput() {
+    const onDown = (e) => {
+      const zoneEl = e.target && e.target.closest ? e.target.closest(".pz-zone") : null;
+      if (!zoneEl || !zoneEl.dataset || !zoneEl.dataset.src) return;
+      const entry = this.entries.get(zoneEl.dataset.src);
+      if (!entry) return;
+      this.setActive(entry.src);
+      if (e.pointerType === "touch") return; // fingers never draw
+      this.showToolbar();
+      this.finalizeDraw(true); // recover from any stuck state, never refuse input
+      const view = this.firstConnectedView(entry);
+      if (!view) return;
+      const svg = view.svgEl();
+      if (!svg) return;
+      e.preventDefault();
+      try {
+        svg.setPointerCapture(e.pointerId);
+      } catch (_) {
+        this.dlog("stroke-abort", "id=" + e.pointerId + " capture-failed");
+        return; // don't track a pointer we can't follow
       }
+      const pt = view.toSvgCoords(e);
+      const erasing = this.tool === "eraser" || this.tool === "pxeraser";
+      this.draw = { entrySrc: entry.src, pointerId: e.pointerId, stroke: null, pathEl: null };
+      this.dlog("stroke-down", "id=" + e.pointerId + " tool=" + this.tool);
+      if (erasing) {
+        this.pushUndo(entry);
+        entry.redo = [];
+        if (this.tool === "pxeraser") {
+          view.eraseAt(pt, true);
+          view.moveRing(pt);
+        } else {
+          view.eraseAt(pt, false);
+        }
+        this.scheduleSave(entry);
+        return;
+      }
+      const stroke = {
+        points: [pt],
+        color: this.color,
+        tool: this.tool,
+        width: (entry.sizes || DEFAULT_SIZES)[this.tool],
+      };
+      const pathEl = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      pathEl.setAttribute("fill", "none");
+      pathEl.setAttribute("stroke-linecap", "round");
+      pathEl.setAttribute("stroke-linejoin", "round");
+      this.draw.stroke = stroke;
+      this.draw.pathEl = pathEl;
+      this.updateDrawPath(entry);
+      svg.appendChild(pathEl);
+    };
+
+    const onMove = (e) => {
+      const d = this.draw;
+      if (!d || e.pointerId !== d.pointerId || e.pointerType === "touch") return;
+      const entry = this.entries.get(d.entrySrc);
+      if (!entry) {
+        this.draw = null;
+        return;
+      }
+      const view = this.firstConnectedView(entry);
+      if (!view) return;
+      e.preventDefault();
+      const pt = view.toSvgCoords(e);
+      const erasing = this.tool === "eraser" || this.tool === "pxeraser";
+      if (erasing) {
+        if (this.tool === "pxeraser") {
+          view.eraseAt(pt, true);
+          view.moveRing(pt);
+        } else {
+          view.eraseAt(pt, false);
+        }
+        this.scheduleSave(entry);
+        return;
+      }
+      if (!d.stroke) return;
+      const last = d.stroke.points[d.stroke.points.length - 1];
+      const dx = pt.x - last.x;
+      const dy = pt.y - last.y;
+      if (dx * dx + dy * dy < 1.2) return;
+      d.stroke.points.push(pt);
+      this.updateDrawPath(entry);
+    };
+
+    const onUp = (e, commit, tag) => {
+      const d = this.draw;
+      if (!d || e.pointerId !== d.pointerId) return;
+      this.dlog(tag, "id=" + e.pointerId);
+      this.finalizeDraw(commit);
+    };
+    const upFn = (e) => onUp(e, true, "stroke-up");
+    const cancelFn = (e) => onUp(e, true, "stroke-cancel");
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", upFn);
+    document.addEventListener("pointercancel", cancelFn);
+    document.addEventListener("lostpointercapture", cancelFn);
+    this.register(() => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", upFn);
+      document.removeEventListener("pointercancel", cancelFn);
+      document.removeEventListener("lostpointercapture", cancelFn);
+    });
+  }
+
+  updateDrawPath(entry) {
+    const d = this.draw;
+    if (!d || !d.pathEl || !d.stroke || !entry) return;
+    d.pathEl.setAttribute("d", pathD(d.stroke.points));
+    if (isDynamicColor(d.stroke.color)) d.pathEl.setAttribute("class", "pz-ink");
+    else d.pathEl.setAttribute("stroke", d.stroke.color);
+    d.pathEl.setAttribute("stroke-width", String(strokeWidthFor(d.stroke, entry.sizes)));
+    d.pathEl.setAttribute("stroke-opacity", String(strokeOpacityFor(d.stroke)));
+  }
+
+  // Commit (or drop) the in-flight stroke, if any. Resets first so it can
+  // never itself throw past a clean state.
+  finalizeDraw(commit) {
+    const d = this.draw;
+    if (!d) return false;
+    this.draw = null;
+    const entry = this.entries.get(d.entrySrc);
+    if (!entry) return true;
+    const erasing = this.tool === "eraser" || this.tool === "pxeraser";
+    if (!erasing && d.stroke && d.stroke.points.length > 0 && commit) {
+      this.pushUndo(entry);
+      entry.redo = [];
+      entry.strokes.push(d.stroke);
+      this.scheduleSave(entry);
     }
+    this.renderEntryViews(entry);
+    this.dlog(
+      "stroke-finalize",
+      "id=" + d.pointerId + " eraser=" + erasing + " pts=" + (d.stroke ? d.stroke.points.length : 0) + " commit=" + commit
+    );
+    return true;
   }
 
   setActive(src) {
@@ -1562,9 +1709,6 @@ class PencilZonesPlugin extends Plugin {
     svg.style.height = Math.round(entry.height) + "px";
     zone.appendChild(svg);
 
-    let activeStroke = null;
-    let activePathEl = null;
-    let activePointerId = null;
     let ring = null; // pixel-eraser cursor ring
 
     function toSvgCoords(e) {
@@ -1572,15 +1716,6 @@ class PencilZonesPlugin extends Plugin {
       const x = ((e.clientX - r.left) / r.width) * CANVAS_W;
       const y = ((e.clientY - r.top) / r.height) * entry.height;
       return { x: Math.max(0, Math.min(CANVAS_W, x)), y: Math.max(0, Math.min(entry.height, y)) };
-    }
-
-    function updateActivePath() {
-      if (!activePathEl || !activeStroke) return;
-      activePathEl.setAttribute("d", pathD(activeStroke.points));
-      if (isDynamicColor(activeStroke.color)) activePathEl.setAttribute("class", "pz-ink");
-      else activePathEl.setAttribute("stroke", activeStroke.color);
-      activePathEl.setAttribute("stroke-width", String(strokeWidthFor(activeStroke, entry.sizes)));
-      activePathEl.setAttribute("stroke-opacity", String(strokeOpacityFor(activeStroke)));
     }
 
     function render() {
@@ -1613,17 +1748,12 @@ class PencilZonesPlugin extends Plugin {
         g.appendChild(p);
       }
       svg.appendChild(g);
-      if (activePathEl && activeStroke) g.appendChild(activePathEl);
+      // Re-attach the live path: a re-render mid-stroke must not lose it.
+      const dd = plugin.draw;
+      if (dd && dd.pathEl && dd.stroke && dd.entrySrc === entry.src) g.appendChild(dd.pathEl);
       svg.setAttribute("viewBox", `0 0 ${CANVAS_W} ${Math.round(entry.height)}`);
       svg.setAttribute("height", String(Math.round(entry.height)));
       svg.style.height = Math.round(entry.height) + "px";
-    }
-
-    function cancelStroke() {
-      activePointerId = null;
-      activeStroke = null;
-      activePathEl = null;
-      render();
     }
 
     // Object eraser: removes whole strokes on contact.
@@ -1714,127 +1844,27 @@ class PencilZonesPlugin extends Plugin {
       if (ring && ring.isConnected) ring.style.display = "none";
     }
 
-    const view = { zoneEl: zone, render, cancelStroke, sectionEl: el, sectionCtx: ctx };
+    function eraseAt(pt, pixel) {
+      return pixel ? pixelEraseAt(pt) : objectEraseAt(pt);
+    }
+
+    const view = {
+      zoneEl: zone,
+      render,
+      svgEl: () => svg,
+      toSvgCoords,
+      eraseAt,
+      moveRing,
+      sectionEl: el,
+      sectionCtx: ctx,
+    };
     entry.views.add(view);
     render();
     plugin.updateToolbarVisibility();
 
-    const isEraserTool = () => plugin.tool === "eraser" || plugin.tool === "pxeraser";
-
-    // ---- drawing: pen + mouse only. Touch never draws. ----
-    // finalizeActive commits (or drops, when asked) whatever track state
-    // exists. Fresh pen/mouse contact ALWAYS recovers through it first:
-    // on iPad a pen stroke can lose its pointerup/cancel around
-    // multi-touch (or a setPointerCapture race), which used to leave
-    // activePointerId set forever and silently refuse all later input.
-    function finalizeActive(commit) {
-      if (activePointerId === null && !activeStroke) return false;
-      const pid = activePointerId;
-      const wasEraser = isEraserTool();
-      const hadStroke = !!activeStroke && activeStroke.points.length > 0;
-      activePointerId = null;
-      hideRing();
-      if (!wasEraser && hadStroke && commit) {
-        plugin.pushUndo(entry);
-        entry.redo = [];
-        entry.strokes.push(activeStroke);
-        plugin.scheduleSave(entry);
-      }
-      activeStroke = null;
-      activePathEl = null;
-      render();
-      plugin.dlog("stroke-finalize", "id=" + pid + " eraser=" + wasEraser + " pts=" + (hadStroke ? "yes" : "no") + " commit=" + commit);
-      return true;
-    }
-
-    svg.addEventListener("pointerdown", (e) => {
-      plugin.setActive(entry.src);
-      if (e.pointerType === "touch") return; // fingers scroll / gesture / move, never draw
-      plugin.showToolbar();
-      finalizeActive(true); // recover from any stuck state, never refuse input
-      e.preventDefault();
-      try {
-        svg.setPointerCapture(e.pointerId);
-      } catch (_) {
-        plugin.dlog("stroke-abort", "id=" + e.pointerId + " capture-failed");
-        return; // don't track a pointer we can't follow
-      }
-      const pt = toSvgCoords(e);
-      activePointerId = e.pointerId;
-      plugin.dlog("stroke-down", "id=" + e.pointerId + " tool=" + plugin.tool);
-
-      if (isEraserTool()) {
-        plugin.pushUndo(entry);
-        entry.redo = [];
-        if (plugin.tool === "pxeraser") {
-          pixelEraseAt(pt);
-          moveRing(pt);
-        } else {
-          objectEraseAt(pt);
-        }
-        plugin.scheduleSave(entry);
-        return;
-      }
-      activeStroke = {
-        points: [pt],
-        color: plugin.color,
-        tool: plugin.tool,
-        width: (entry.sizes || DEFAULT_SIZES)[plugin.tool],
-      };
-      activePathEl = document.createElementNS(SVGNS, "path");
-      activePathEl.setAttribute("fill", "none");
-      activePathEl.setAttribute("stroke-linecap", "round");
-      activePathEl.setAttribute("stroke-linejoin", "round");
-      updateActivePath();
-      svg.appendChild(activePathEl);
-    });
-
-    svg.addEventListener("pointermove", (e) => {
-      if (e.pointerId !== activePointerId || e.pointerType === "touch") return;
-      e.preventDefault();
-      const pt = toSvgCoords(e);
-      if (isEraserTool()) {
-        if (plugin.tool === "pxeraser") {
-          pixelEraseAt(pt);
-          moveRing(pt);
-        } else {
-          objectEraseAt(pt);
-        }
-        plugin.scheduleSave(entry);
-        return;
-      }
-      if (!activeStroke) return;
-      const last = activeStroke.points[activeStroke.points.length - 1];
-      const dx = pt.x - last.x;
-      const dy = pt.y - last.y;
-      if (dx * dx + dy * dy < 1.2) return;
-      activeStroke.points.push(pt);
-      updateActivePath();
-    });
-
-    function finishStroke(e) {
-      if (e.pointerId !== activePointerId) return;
-      plugin.dlog("stroke-up", "id=" + e.pointerId);
-      finalizeActive(true);
-    }
-    function cancelStrokeInput(e) {
-      if (e.pointerId !== activePointerId) return;
-      plugin.dlog("stroke-cancel", "id=" + e.pointerId + " type=" + e.type);
-      finalizeActive(true); // commit partial ink rather than losing it
-    }
-    svg.addEventListener("pointerup", finishStroke);
-    svg.addEventListener("pointercancel", cancelStrokeInput);
-    svg.addEventListener("lostpointercapture", cancelStrokeInput);
-    svg.addEventListener("pointerleave", () => {
-      if (activePointerId === null) hideRing();
-    });
-
-    // Tapping a zone marks it active + reveals the toolbar.
-    zone.addEventListener("pointerdown", (e) => {
-      if (e.pointerType === "touch") return;
-      plugin.setActive(entry.src);
-      plugin.showToolbar();
-    });
+    // Stroke input is document-delegated (setupDrawInput); nothing
+    // per-element here except the resize handle, so re-renders can never
+    // strand input listeners.
 
     // Prevent iPad pinch-zoom / callout interference inside the zone.
     zone.addEventListener("gesturestart", (e) => e.preventDefault());
