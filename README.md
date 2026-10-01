@@ -26,6 +26,7 @@ One floating panel controls every zone. It only appears when the current note ha
 ## Gestures & moving
 
 - **2-finger tap** = undo, **3-finger tap** = redo (also available as commands for desktop).
+- **Pinch** in/out with two fingers resizes the active tool — per tool, per zone, saved in the SVG. No indicator; strokes re-render live. Small drifts still count as taps.
 - **Long-press** a zone with one finger to lift it, drag it before/after other content with a blinking caret preview, release to drop. The source is verified before rewriting, so a stale mapping aborts instead of corrupting the note.
 
 ## Storage
