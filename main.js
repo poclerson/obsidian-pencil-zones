@@ -712,21 +712,36 @@ class PencilZonesPlugin extends Plugin {
       has = false;
     }
     this.toolbarEl.classList.toggle("pz-hidden", !(has && !this.typingHidden));
-    if (has && !this.typingHidden) this.applyDock();
+    this.applyDock();
   }
 
   dockMetrics() {
-    if (typeof window === "undefined") return null;
     const bar = this.toolbarEl;
     if (!bar) return null;
     const w = bar.offsetWidth || 0;
     const h = bar.offsetHeight || 0;
     if (!w || !h) return null;
-    return { w, h, vw: window.innerWidth || 1024, vh: window.innerHeight || 768 };
+    // Dock area = the active pane's content rect, so the panel can never
+    // leave the note and slide over side panels (file explorer, etc.).
+    const vw = (typeof window !== "undefined" && window.innerWidth) || 1024;
+    const vh = (typeof window !== "undefined" && window.innerHeight) || 768;
+    let area = { left: 0, top: 0, right: vw, bottom: vh };
+    try {
+      const view = this.activeMarkdownView();
+      const cel = view && view.containerEl;
+      if (cel && typeof cel.getBoundingClientRect === "function") {
+        const r = cel.getBoundingClientRect();
+        if (r && r.width > 60 && r.height > 60) {
+          area = { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+        }
+      }
+    } catch (_) {}
+    return { w, h, vw, vh, area };
   }
 
-  // Position from saved dock (side + vertical fraction). The panel lives on
-  // the left or right side only — never floating mid-screen.
+  // Position from saved dock (side + vertical fraction), clamped to the
+  // active pane's content area. The panel lives on the left or right side
+  // only — never floating mid-screen, never over side panels.
   applyDock() {
     const bar = this.toolbarEl;
     if (!bar || bar.classList.contains("pz-hidden")) return;
@@ -736,12 +751,15 @@ class PencilZonesPlugin extends Plugin {
     let yFrac = this.settings.dockYFrac;
     let top;
     if (typeof yFrac !== "number" || !Number.isFinite(yFrac)) {
-      top = m.vh - m.h - 18; // bottom-right by default
+      top = m.area.bottom - m.h - 18; // bottom-right by default
     } else {
       top = Math.min(1, Math.max(0, yFrac)) * m.vh;
     }
-    top = Math.max(8, Math.min(top, Math.max(8, m.vh - m.h - 8)));
-    const left = side === "left" ? 8 : Math.max(8, m.vw - m.w - 8);
+    top = Math.max(m.area.top + 8, Math.min(top, Math.max(m.area.top + 8, m.area.bottom - m.h - 8)));
+    const left =
+      side === "left"
+        ? m.area.left + 8
+        : Math.max(m.area.left + 8, m.area.right - m.w - 8);
     bar.style.left = Math.round(left) + "px";
     bar.style.top = Math.round(top) + "px";
     bar.style.right = "auto";
@@ -779,8 +797,11 @@ class PencilZonesPlugin extends Plugin {
       if (bar.parentNode) bar.parentNode.removeChild(bar);
     });
 
-    // Grip strip at the top: drag the panel, release snaps to nearest side.
-    const grip = bar.createDiv({ cls: "pz-grip", text: "⋯" });
+    // Grip strip at the top: drag the panel, release snaps to a side.
+    // Sliding toward a side docks there (like the iPadOS drawing toolbar):
+    // fling direction wins, otherwise the nearest side wins.
+    const grip = bar.createDiv({ cls: "pz-grip" });
+    for (let i = 0; i < 3; i++) grip.createSpan({ cls: "pz-dot" });
     grip.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -788,6 +809,8 @@ class PencilZonesPlugin extends Plugin {
       grip._dx = e.clientX - r.left;
       grip._dy = e.clientY - r.top;
       grip._drag = true;
+      grip._samples = [{ x: e.clientX, t: Date.now() }];
+      bar.classList.remove("pz-snapping");
       grip.classList.add("pz-grabbing");
       try {
         grip.setPointerCapture(e.pointerId);
@@ -796,10 +819,19 @@ class PencilZonesPlugin extends Plugin {
     grip.addEventListener("pointermove", (e) => {
       if (!grip._drag) return;
       e.preventDefault();
+      const now = Date.now();
+      grip._samples.push({ x: e.clientX, t: now });
+      while (grip._samples.length > 2 && now - grip._samples[0].t > 150) grip._samples.shift();
       const m = plugin.dockMetrics();
       if (!m) return;
-      const left = Math.max(-m.w + 40, Math.min(e.clientX - (grip._dx || 0), m.vw - 40));
-      const top = Math.max(8, Math.min(e.clientY - (grip._dy || 0), Math.max(8, m.vh - m.h - 8)));
+      const left = Math.max(
+        m.area.left - m.w + 40,
+        Math.min(e.clientX - (grip._dx || 0), m.area.right - 40)
+      );
+      const top = Math.max(
+        m.area.top + 8,
+        Math.min(e.clientY - (grip._dy || 0), Math.max(m.area.top + 8, m.area.bottom - m.h - 8))
+      );
       bar.style.left = Math.round(left) + "px";
       bar.style.top = Math.round(top) + "px";
       bar.style.right = "auto";
@@ -812,11 +844,23 @@ class PencilZonesPlugin extends Plugin {
       try {
         grip.releasePointerCapture(e.pointerId);
       } catch (_) {}
-      // Snap to the nearest side only.
+      // Direction wins over position: a leftward slide docks left even if
+      // released right of center (and vice versa).
+      let vx = 0;
+      const s = grip._samples || [];
+      if (s.length >= 2) {
+        const dt = s[s.length - 1].t - s[0].t;
+        const dx = s[s.length - 1].x - s[0].x;
+        if (dt > 0) vx = dx / dt;
+        else if (dx !== 0) vx = dx > 0 ? Infinity : -Infinity;
+      }
       const m = plugin.dockMetrics();
-      const vw = (m && m.vw) || (typeof window !== "undefined" && window.innerWidth) || 1024;
       const r = bar.getBoundingClientRect();
-      const side = r.left + r.width / 2 < vw / 2 ? "left" : "right";
+      const mid = m ? (m.area.left + m.area.right) / 2 : 512;
+      const side = vx < -0.35 ? "left" : vx > 0.35 ? "right" : r.left + r.width / 2 < mid ? "left" : "right";
+      // Animate the snap; free drags stay instant.
+      bar.classList.add("pz-snapping");
+      setTimeout(() => bar.classList.remove("pz-snapping"), 350);
       plugin.saveDock(side, r.top).then(() => plugin.applyDock());
     };
     grip.addEventListener("pointerup", endDrag);

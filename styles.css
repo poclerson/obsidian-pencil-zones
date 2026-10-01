@@ -56,7 +56,10 @@ body.pz-moving-active * {
 }
 
 /* One global toolbar: grip on top, two columns below (colors | tools).
-   JS positions it; it snaps to the left or right side only. */
+   JS positions it; it snaps to the left or right side only, clamped to the
+   active pane so it never covers side panels.
+   Stacking: below Obsidian side drawers (layer-popover = 30) and the
+   sidedock (layer-sidedock = 10), above note content. */
 .pz-global {
   position: fixed;
   display: flex;
@@ -68,8 +71,8 @@ body.pz-moving-active * {
   border: 1px solid var(--background-modifier-border);
   border-radius: 18px;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  z-index: 1000;
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  z-index: 8;
+  transition: opacity 0.28s cubic-bezier(0.32, 0.72, 0, 1), transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
@@ -78,19 +81,22 @@ body.pz-moving-active * {
 .pz-global.pz-hidden {
   opacity: 0;
   pointer-events: none;
-  transform: translateY(8px);
+  transform: translateY(10px) scale(0.98);
+}
+
+/* Snap/dock glide only: free drags stay instant */
+.pz-global.pz-snapping {
+  transition: opacity 0.28s cubic-bezier(0.32, 0.72, 0, 1),
+    transform 0.28s cubic-bezier(0.32, 0.72, 0, 1),
+    left 0.3s cubic-bezier(0.32, 0.72, 0, 1), top 0.3s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 /* Top drag strip: grab here to move the panel (releases snap to a side) */
 .pz-grip {
-  height: 16px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  line-height: 1;
-  letter-spacing: 1px;
-  color: var(--text-faint);
   cursor: grab;
   touch-action: none;
   user-select: none;
@@ -99,7 +105,15 @@ body.pz-moving-active * {
 
 .pz-grip.pz-grabbing {
   cursor: grabbing;
-  color: var(--text-muted);
+}
+
+.pz-grip .pz-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  margin: 0 2px;
+  flex: none;
 }
 
 .pz-global .pz-body {
@@ -158,13 +172,14 @@ body.pz-moving-active * {
   background: #ffffff;
 }
 
-/* Drop cursor: blinking text-caret preview of the move landing spot */
+/* Drop cursor: blinking text-caret preview of the move landing spot.
+   Same stacking as the toolbar: never above side panels. */
 .pz-drop-cursor {
   position: fixed;
   width: 3px;
   border-radius: 2px;
   background: var(--interactive-accent);
-  z-index: 2000;
+  z-index: 8;
   pointer-events: none;
   animation: pz-blink 1s steps(2, start) infinite;
 }
