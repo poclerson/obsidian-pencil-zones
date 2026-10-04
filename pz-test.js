@@ -599,6 +599,42 @@ function findTag(el, tag) {
   await tick(40);
   ok("scroll still locked after resize", scroller.scrollTop === 123);
 
+  // ---- rapid-fire spam: per-stroke cost must stay flat ----
+  const hostSpam = mkHost();
+  plugin.renderZone("src: test/spam.svg\nheight: 300", hostSpam, {});
+  const entrySpam = plugin.entries.get("test/spam.svg");
+  const svgSpam = findKids(hostSpam, "pz-zone")[0].children.find((c) => c.tag === "svg");
+  const gSpam = () => findTag(hostSpam, "g");
+  const N_SPAM = 80;
+  for (let i = 0; i < N_SPAM; i++) {
+    fire(svgSpam, "pointerdown", pev({ pointerId: 300 + i, clientX: 50 + (i % 10), clientY: 30 }));
+    fire(svgSpam, "pointermove", pev({ pointerId: 300 + i, clientX: 60 + (i % 10), clientY: 35 }));
+    fire(svgSpam, "pointerup", pev({ pointerId: 300 + i }));
+  }
+  ok("spam stores every stroke", entrySpam.strokes.length === N_SPAM);
+  ok("rendered paths match strokes", gSpam().children.length === N_SPAM);
+  ok("undo stack bounded", entrySpam.undo.length <= 50);
+  const liveNode = gSpam().children[0];
+  fire(svgSpam, "pointerdown", pev({ pointerId: 999, clientX: 50, clientY: 60 }));
+  fire(svgSpam, "pointermove", pev({ pointerId: 999, clientX: 60, clientY: 65 }));
+  fire(svgSpam, "pointerup", pev({ pointerId: 999 }));
+  ok("commit appends without full rebuild",
+    gSpam().children.length === N_SPAM + 1 && gSpam().children.includes(liveNode));
+  const lastSpam = entrySpam.strokes[entrySpam.strokes.length - 1];
+  plugin.doUndo();
+  ok("undo drops last stroke", entrySpam.strokes.length === N_SPAM && !entrySpam.strokes.includes(lastSpam));
+  plugin.doRedo();
+  ok("redo restores stroke", entrySpam.strokes.length === N_SPAM + 1 && entrySpam.strokes.includes(lastSpam));
+  // eraser undo restores via set-snapshot
+  plugin.tool = "eraser";
+  const beforeErase = entrySpam.strokes.length;
+  fire(svgSpam, "pointerdown", pev({ pointerId: 1000, clientX: 50, clientY: 30 }));
+  fire(svgSpam, "pointerup", pev({ pointerId: 1000 }));
+  ok("eraser removes hit strokes", entrySpam.strokes.length < beforeErase);
+  plugin.doUndo();
+  ok("erase-undo restores strokes", entrySpam.strokes.length === beforeErase);
+  plugin.tool = "pencil";
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error("HARNESS ERROR", e); process.exit(2); });

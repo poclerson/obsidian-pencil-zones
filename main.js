@@ -1,4 +1,4 @@
-/* Pencil Zones v0.8.3 — plain-JS Obsidian plugin (no build step).
+/* Pencil Zones v0.8.4 — plain-JS Obsidian plugin (no build step).
  *
  * - Command "Insert drawing zone" creates a resizable inline canvas.
  * - Strokes saved as standalone SVG in a configurable root folder.
@@ -54,6 +54,25 @@ const TAP_MAX_MOVE = 30; // px per finger, compared against its OWN start pos
 // Long-press-to-move tuning
 const MOVE_PRESS_MS = 600;
 const MOVE_TOL = 12; // px finger may wander during the hold
+
+// Undo tuning: action-based (not snapshots), so rapid drawing stays O(1)
+// per stroke instead of deep-copying every stroke on every commit.
+const UNDO_CAP = 50;
+
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function buildStrokePath(s) {
+  const p = document.createElementNS(SVGNS, "path");
+  p.setAttribute("d", pathD(s.points));
+  if (isDynamicColor(s.color)) p.setAttribute("class", "pz-ink");
+  else p.setAttribute("stroke", s.color || "#000000");
+  p.setAttribute("fill", "none");
+  p.setAttribute("stroke-width", String(strokeWidthFor(s)));
+  p.setAttribute("stroke-opacity", String(strokeOpacityFor(s)));
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  return p;
+}
 
 const DEFAULT_SETTINGS = {
   svgFolder: "_inline_handwriting",
@@ -298,11 +317,17 @@ class PencilZonesPlugin extends Plugin {
       id: "copy-diagnostics",
       name: "Copy input diagnostics",
       callback: async () => {
+        const lines = [];
+        for (const e of this.entries.values()) {
+          lines.push(`${e.src} strokes=${e.strokes.length} undo=${e.undo.length} redo=${e.redo.length} views=${e.views.size}`);
+        }
         const text =
           "Pencil Zones diagnostics\nentries=" +
           this.entries.size +
           " active=" +
           this.activeSrc +
+          "\n" +
+          lines.join("\n") +
           "\n" +
           this.diag.join("\n");
         try {
@@ -640,9 +665,22 @@ class PencilZonesPlugin extends Plugin {
     }
   }
 
-  pushUndo(entry) {
-    entry.undo.push(JSON.parse(JSON.stringify(entry.strokes)));
-    if (entry.undo.length > 100) entry.undo.shift();
+  // Action-based undo: O(1) per stroke. Adds store the stroke instance;
+  // structural ops (erase) snapshot the array — but only around the op,
+  // never on every commit. Arrays are always shallow-copied on store so
+  // later pushes can't corrupt history.
+  pushAddUndo(entry, stroke) {
+    entry.undo.push({ op: "add", stroke });
+    if (entry.undo.length > UNDO_CAP) entry.undo.shift();
+  }
+
+  pushSetUndo(entry, before) {
+    entry.undo.push({ op: "set", before: before.slice(), after: entry.strokes.slice() });
+    if (entry.undo.length > UNDO_CAP) entry.undo.shift();
+  }
+
+  capRedo(entry) {
+    if (entry.redo.length > UNDO_CAP) entry.redo.splice(0, entry.redo.length - UNDO_CAP);
   }
 
   activeEntry() {
@@ -662,8 +700,15 @@ class PencilZonesPlugin extends Plugin {
     if (!entry) return;
     this.setActive(entry.src);
     if (entry.undo.length === 0) return;
-    entry.redo.push(JSON.parse(JSON.stringify(entry.strokes)));
-    entry.strokes = entry.undo.pop();
+    const act = entry.undo.pop();
+    if (act.op === "add") {
+      entry.strokes = entry.strokes.filter((s) => s !== act.stroke);
+      entry.redo.push(act);
+    } else {
+      entry.redo.push({ op: "set", before: entry.strokes.slice(), after: act.after });
+      entry.strokes = act.before;
+    }
+    this.capRedo(entry);
     this.renderEntryViews(entry);
     this.scheduleSave(entry);
   }
@@ -673,8 +718,15 @@ class PencilZonesPlugin extends Plugin {
     if (!entry) return;
     this.setActive(entry.src);
     if (entry.redo.length === 0) return;
-    entry.undo.push(JSON.parse(JSON.stringify(entry.strokes)));
-    entry.strokes = entry.redo.pop();
+    const act = entry.redo.pop();
+    if (act.op === "add") {
+      entry.strokes.push(act.stroke);
+      entry.undo.push(act);
+    } else {
+      entry.undo.push({ op: "set", before: entry.strokes.slice(), after: act.after });
+      entry.strokes = act.after;
+    }
+    if (entry.undo.length > UNDO_CAP) entry.undo.shift();
     this.renderEntryViews(entry);
     this.scheduleSave(entry);
   }
@@ -749,14 +801,16 @@ class PencilZonesPlugin extends Plugin {
       this.draw = { entrySrc: entry.src, pointerId: e.pointerId, stroke: null, pathEl: null, view };
       this.dlog("stroke-down", "id=" + e.pointerId + " tool=" + this.tool);
       if (erasing) {
-        this.pushUndo(entry);
+        const before = entry.strokes.slice();
         entry.redo = [];
+        let changed;
         if (this.tool === "pxeraser") {
-          view.eraseAt(pt, true);
+          changed = view.eraseAt(pt, true);
           view.moveRing(pt);
         } else {
-          view.eraseAt(pt, false);
+          changed = view.eraseAt(pt, false);
         }
+        if (changed) this.pushSetUndo(entry, before);
         this.scheduleSave(entry);
         return;
       }
@@ -861,17 +915,43 @@ class PencilZonesPlugin extends Plugin {
     if (!entry) return true;
     const erasing = this.tool === "eraser" || this.tool === "pxeraser";
     if (!erasing && d.stroke && d.stroke.points.length > 0 && commit) {
-      this.pushUndo(entry);
+      // Detach the live path; each view gets a fresh committed node.
+      if (d.pathEl && d.pathEl.parentNode) {
+        try {
+          d.pathEl.parentNode.removeChild(d.pathEl);
+        } catch (_) {}
+      }
+      this.pushAddUndo(entry, d.stroke);
       entry.redo = [];
       entry.strokes.push(d.stroke);
+      this.appendStrokeToViews(entry, d.stroke);
       this.scheduleSave(entry);
+    } else {
+      this.renderEntryViews(entry);
     }
-    this.renderEntryViews(entry);
     this.dlog(
       "stroke-finalize",
       "id=" + d.pointerId + " eraser=" + erasing + " pts=" + (d.stroke ? d.stroke.points.length : 0) + " commit=" + commit
     );
     return true;
+  }
+
+  // Append-only commit rendering: O(1) DOM work per stroke. Falls back to
+  // a full render for any view that can't take the fast path.
+  appendStrokeToViews(entry, stroke) {
+    for (const v of entry.views) {
+      if (!v.zoneEl.isConnected) {
+        entry.views.delete(v);
+        continue;
+      }
+      try {
+        if (!v.appendStroke || !v.appendStroke(stroke)) v.render();
+      } catch (_) {
+        try {
+          v.render();
+        } catch (_) {}
+      }
+    }
   }
 
   setActive(src) {
@@ -1708,7 +1788,6 @@ class PencilZonesPlugin extends Plugin {
 
     const plugin = this;
     const entry = this.getEntry(src, height, showLines);
-    const SVGNS = "http://www.w3.org/2000/svg";
 
     const zone = el.createDiv({ cls: "pz-zone" });
     zone.dataset.src = src;
@@ -1731,6 +1810,7 @@ class PencilZonesPlugin extends Plugin {
     zone.appendChild(svg);
 
     let ring = null; // pixel-eraser cursor ring
+    let strokeG = null; // live <g> holding the committed stroke paths
 
     function toSvgCoords(e) {
       // Exact only because the element aspect matches the viewBox (see
@@ -1744,6 +1824,7 @@ class PencilZonesPlugin extends Plugin {
     function render() {
       while (svg.firstChild) svg.removeChild(svg.firstChild);
       ring = null;
+      strokeG = null;
       // No background rect: the theme background shows through.
       if (entry.lines) {
         for (let y = LINE_SPACING; y < entry.height; y += LINE_SPACING) {
@@ -1758,19 +1839,9 @@ class PencilZonesPlugin extends Plugin {
         }
       }
       const g = document.createElementNS(SVGNS, "g");
-      for (const s of entry.strokes) {
-        const p = document.createElementNS(SVGNS, "path");
-        p.setAttribute("d", pathD(s.points));
-        if (isDynamicColor(s.color)) p.setAttribute("class", "pz-ink");
-        else p.setAttribute("stroke", s.color || "#000000");
-        p.setAttribute("fill", "none");
-        p.setAttribute("stroke-width", String(strokeWidthFor(s)));
-        p.setAttribute("stroke-opacity", String(strokeOpacityFor(s)));
-        p.setAttribute("stroke-linecap", "round");
-        p.setAttribute("stroke-linejoin", "round");
-        g.appendChild(p);
-      }
+      for (const s of entry.strokes) g.appendChild(buildStrokePath(s));
       svg.appendChild(g);
+      strokeG = g;
       // Re-attach the live path: a re-render mid-stroke must not lose it.
       const dd = plugin.draw;
       if (dd && dd.pathEl && dd.stroke && dd.entrySrc === entry.src) g.appendChild(dd.pathEl);
@@ -1873,9 +1944,22 @@ class PencilZonesPlugin extends Plugin {
       return pixel ? pixelEraseAt(pt) : objectEraseAt(pt);
     }
 
+    // Append-only commit path: O(1) per stroke instead of rebuilding every
+    // path element. Returns false when a full render is needed instead.
+    function appendStroke(s) {
+      if (!strokeG || !strokeG.isConnected) return false;
+      try {
+        strokeG.appendChild(buildStrokePath(s));
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
     const view = {
       zoneEl: zone,
       render,
+      appendStroke,
       svgEl: () => svg,
       toSvgCoords,
       eraseAt,
