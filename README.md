@@ -27,6 +27,7 @@ One floating panel controls every zone. It only appears when the current note ha
 
 - **2-finger tap** = undo, **3-finger tap** = redo (also available as commands for desktop).
 - **Long-press** a zone with one finger to lift it, drag it before/after other content with a blinking caret preview, release to drop. The source is verified before rewriting, so a stale mapping aborts instead of corrupting the note.
+- **Platform toggles**: turn the plugin off per platform (desktop / mobile) in settings. Where off, zones render as static images and all input stays off; files and notes are untouched.
 
 ## Storage
 

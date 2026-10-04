@@ -15,7 +15,7 @@ class FakeClassList {
 class FakeEl {
   constructor(tag) {
     this.tag = tag; this.children = []; this.dataset = {};
-    this.style = {}; this.attrs = {}; this._on = {};
+    this.style = {}; this.attrs = {}; this._on = {}; this._cap = {};
     this.classList = new FakeClassList();
     this.parentNode = null; this.text = "";
     this.offsetWidth = 120; this.offsetHeight = 300;
@@ -48,8 +48,15 @@ class FakeEl {
   empty() { for (const c of this.children) c.parentNode = null; this.children = []; }
   setAttribute(k, v) { this.attrs[k] = v; }
   setText(t) { this.text = t; }
-  addEventListener(t, f) { (this._on[t] = this._on[t] || []).push(f); }
-  removeEventListener(t, f) { this._on[t] = (this._on[t] || []).filter((x) => x !== f); }
+  addEventListener(t, f, o) {
+    (this._on[t] = this._on[t] || []).push({ f, cap: !!(o && o.capture) });
+    (this._cap[t] = this._cap[t] || []).push(!!(o && o.capture));
+  }
+  removeEventListener(t, f) {
+    const kept = (this._on[t] || []).filter((x) => x.f !== f);
+    this._on[t] = kept;
+    this._cap[t] = kept.map((x) => x.cap);
+  }
   querySelector() { return null; }
   closest(sel) {
     const m = /^\.([\w-]+)$/.exec(sel || "");
@@ -72,9 +79,17 @@ class FakeEl {
 const fakeDoc = {
   body: new FakeEl("body"),
   _on: {},
+  _cap: {},
   activeElement: null,
-  addEventListener(t, f) { (this._on[t] = this._on[t] || []).push(f); },
-  removeEventListener(t, f) { this._on[t] = (this._on[t] || []).filter((x) => x !== f); },
+  addEventListener(t, f, o) {
+    (this._on[t] = this._on[t] || []).push({ f, cap: !!(o && o.capture) });
+    (this._cap[t] = this._cap[t] || []).push(!!(o && o.capture));
+  },
+  removeEventListener(t, f) {
+    const kept = (this._on[t] || []).filter((x) => x.f !== f);
+    this._on[t] = kept;
+    this._cap[t] = kept.map((x) => x.cap);
+  },
   createElementNS(ns, tag) { return new FakeEl(tag); },
   elementFromPoint() { return null; },
 };
@@ -108,7 +123,13 @@ class StubPlugin {
 }
 Module._load = function (req, ...rest) {
   if (req === "obsidian") {
-    return { Plugin: StubPlugin, PluginSettingTab: class {}, Setting: Chain, MarkdownView: class {} };
+    return {
+      Plugin: StubPlugin,
+      PluginSettingTab: class {},
+      Setting: Chain,
+      MarkdownView: class {},
+      Platform: { isMobile: false, isDesktop: true },
+    };
   }
   return origLoad.call(this, req, ...rest);
 };
@@ -124,17 +145,19 @@ const fakeApp = {
       exists: async (p) => p in files,
       read: async (f) => files[typeof f === "string" ? f : f.path],
       write: async (p, t) => { files[p] = t; },
+      getResourcePath: (p) => "app://pz-test/" + p,
     },
     create: async (p, t) => { files[p] = t; },
     read: async (f) => files[typeof f === "string" ? f : f.path],
     modify: async (f, t) => { files[typeof f === "string" ? f : f.path] = t; },
+    getResourcePath: (p) => "app://pz-test/" + p,
   },
   workspace: { on: () => ({}), getActiveViewOfType: () => mockView, getActiveFile: () => mockFile },
 };
 
 function fire(el, type, evt) {
-  // bubble like the DOM: target first, ancestors, then document.
-  // Honors stopPropagation (resize handle relies on it).
+  // Like the DOM: document capture listeners first, then target-to-root
+  // bubble. Honors stopPropagation (resize handle relies on it).
   if (evt) {
     if (evt.target === undefined) evt.target = el;
     const origStop = evt.stopPropagation;
@@ -143,14 +166,23 @@ function fire(el, type, evt) {
       if (origStop) return origStop.apply(this, arguments);
     };
   }
+  if (el !== fakeDoc) {
+    for (const x of ((fakeDoc._on[type]) || [])) {
+      if (x.cap) x.f(evt);
+      if (evt && evt._stopped) return;
+    }
+  }
   let n = el, sawDoc = false;
   while (n) {
     if (n === fakeDoc) sawDoc = true;
-    for (const f of ((n._on && n._on[type]) || [])) f(evt);
+    for (const x of ((n._on && n._on[type]) || [])) {
+      if (n === fakeDoc && x.cap) continue; // already ran in capture phase
+      x.f(evt);
+    }
     if (evt && evt._stopped) return;
     n = n.parentNode;
   }
-  if (!sawDoc) for (const f of ((fakeDoc._on[type]) || [])) f(evt);
+  if (!sawDoc) for (const x of ((fakeDoc._on[type]) || [])) { if (!x.cap) x.f(evt); }
 }
 function pev(over) {
   return Object.assign(
@@ -505,6 +537,67 @@ function findTag(el, tag) {
   mockView = { getMode: () => "preview", containerEl: { querySelector: () => null }, editor: undefined };
   await plugin.persistBlockParams("test/resize.svg", { height: 500 });
   ok("reading persist writes file", files["note-rz.md"].includes("height: 500"));
+
+  // ---- platform kill switch ----
+  plugin.settings.enableDesktop = false;
+  const hostOff = mkHost();
+  plugin.renderZone("src: test/off.svg\nheight: 300", hostOff, {});
+  ok("disabled renders static image, no live zone",
+    findKids(hostOff, "pz-zone").length === 0 &&
+    findKids(hostOff, "pz-static").length === 1 &&
+    !plugin.entries.has("test/off.svg"));
+  const staticImg = findKids(hostOff, "pz-static")[0];
+  ok("static image points at resource", staticImg.src === "app://pz-test/test/off.svg");
+  plugin.applyEnabledState();
+  ok("disabled removes toolbar", plugin.toolbarEl === null);
+  const svgLive = zoneRz().children.find((c) => c.tag === "svg");
+  const nOff = entryRz.strokes.length;
+  fire(svgLive, "pointerdown", pev({ pointerId: 221, clientX: 50, clientY: 30 }));
+  fire(svgLive, "pointermove", pev({ pointerId: 221, clientX: 60, clientY: 35 }));
+  fire(svgLive, "pointerup", pev({ pointerId: 221 }));
+  ok("disabled draws nothing on live zone", entryRz.strokes.length === nOff && plugin.draw === null);
+  const uOff = entryRz.undo.length;
+  fire(fakeDoc, "touchstart", { touches: [touch(70, 100, 100)], changedTouches: [touch(70, 100, 100)] });
+  fire(fakeDoc, "touchstart", { touches: [touch(70, 100, 100), touch(71, 200, 200)], changedTouches: [touch(71, 200, 200)] });
+  fire(fakeDoc, "touchend", { touches: [touch(71, 200, 200)], changedTouches: [touch(70, 100, 100)] });
+  fire(fakeDoc, "touchend", { touches: [], changedTouches: [touch(71, 200, 200)] });
+  ok("disabled ignores gestures", entryRz.undo.length === uOff && entryRz.strokes.length === nOff);
+  plugin.settings.enableDesktop = true;
+  plugin.applyEnabledState();
+  ok("re-enable rebuilds toolbar", !!plugin.toolbarEl);
+  const hostOn = mkHost();
+  plugin.renderZone("src: test/off.svg\nheight: 300", hostOn, {});
+  ok("re-enabled renders live zone", findKids(hostOn, "pz-zone").length === 1);
+
+  // ---- capture-phase delegation ----
+  const caps = fakeDoc._cap || {};
+  const hasCap = (t) => (caps[t] || []).some(Boolean);
+  ok("draw listeners use capture phase",
+    ["pointerdown", "pointermove", "pointerup", "pointercancel", "lostpointercapture"].every(hasCap));
+  // pen press on the resize handle must not start a stroke
+  const rzHandle = findKids(rzHost, "pz-resize")[0];
+  const nRz = entryRz.strokes.length;
+  fire(rzHandle, "pointerdown", pev({ pointerId: 230, clientX: 50, clientY: 300 }));
+  ok("pen down on handle starts no stroke", plugin.draw === null);
+  fire(rzHandle, "pointerup", pev({ pointerId: 230, clientX: 50, clientY: 300 }));
+  await tick(40);
+  ok("handle press leaks no stroke", entryRz.strokes.length === nRz);
+
+  // ---- resize holds surrounding scroll position ----
+  const scroller = new FakeEl("div");
+  scroller.classList.add("cm-scroller");
+  scroller.scrollTop = 123;
+  detach(rzHost);
+  scroller.appendChild(rzHost);
+  fakeDoc.body.appendChild(scroller);
+  const rzScroll = findKids(rzHost, "pz-resize")[0];
+  fire(rzScroll, "pointerdown", pev({ pointerId: 231, clientX: 50, clientY: 300 }));
+  scroller.scrollTop = 999; // browser tried to jump mid-drag
+  fire(rzScroll, "pointermove", pev({ pointerId: 231, clientX: 50, clientY: 340 }));
+  ok("resize restores scroll position", scroller.scrollTop === 123);
+  fire(rzScroll, "pointerup", pev({ pointerId: 231, clientX: 50, clientY: 340 }));
+  await tick(40);
+  ok("scroll still locked after resize", scroller.scrollTop === 123);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

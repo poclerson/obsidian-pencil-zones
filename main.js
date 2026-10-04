@@ -1,4 +1,4 @@
-/* Pencil Zones v0.8.2 — plain-JS Obsidian plugin (no build step).
+/* Pencil Zones v0.8.3 — plain-JS Obsidian plugin (no build step).
  *
  * - Command "Insert drawing zone" creates a resizable inline canvas.
  * - Strokes saved as standalone SVG in a configurable root folder.
@@ -24,7 +24,7 @@
  * - Optional ruled lines per zone (toggle in toolbar, persisted).
  */
 
-const { Plugin, PluginSettingTab, Setting, MarkdownView } = require("obsidian");
+const { Plugin, PluginSettingTab, Setting, MarkdownView, Platform } = require("obsidian");
 
 const CODE_LANG = "pencil-draw";
 const CANVAS_W = 800;
@@ -62,6 +62,8 @@ const DEFAULT_SETTINGS = {
   dockSide: "right", // "left" | "right": toolbar snaps to sides only
   dockYFrac: null, // 0..1 fraction of viewport height; null = bottom default
   verboseLog: false, // console.log input diagnostics (buffer always records)
+  enableDesktop: true, // draw/edit zones on desktop apps
+  enableMobile: true, // draw/edit zones on mobile apps (iPad etc.)
 };
 
 function pad2(n) {
@@ -317,8 +319,8 @@ class PencilZonesPlugin extends Plugin {
       this.renderZone(source, el, ctx);
     });
 
-    this.buildGlobalToolbar();
     this.buildDropCursor();
+    this.applyEnabledState();
     this.setupDrawInput();
     this.trackFingerGestures();
     this.setupMoveMode();
@@ -382,6 +384,42 @@ class PencilZonesPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  // Per-platform kill switch. When disabled here, zones render as static
+  // images and all input (draw, gestures, move, toolbar) stays off — but
+  // files and note content are untouched.
+  isEnabled() {
+    try {
+      if (Platform.isMobile) return !!this.settings.enableMobile;
+      return !!this.settings.enableDesktop;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  applyEnabledState() {
+    if (this.isEnabled()) {
+      if (!this.toolbarEl) this.buildGlobalToolbar();
+      this.updateToolbarVisibility();
+      return;
+    }
+    this.finalizeDraw(false);
+    this.cancelMove();
+    if (this.toolbarEl) {
+      if (this.toolbarEl.parentNode) this.toolbarEl.parentNode.removeChild(this.toolbarEl);
+      this.toolbarEl = null;
+    }
+  }
+
+  // Static non-interactive rendering for platforms where the plugin is off.
+  renderStatic(src, el) {
+    const img = el.createEl("img", { cls: "pz-static" });
+    try {
+      img.src = this.app.vault.adapter.getResourcePath(this.svgPath(src));
+    } catch (_) {}
+    img.style.width = "100%";
+    img.style.display = "block";
   }
 
   // Always-on input diagnostics ring buffer (cheap). "Copy input
@@ -664,9 +702,18 @@ class PencilZonesPlugin extends Plugin {
   // events bubble from whatever the current canvas is, and a re-render
   // mid-stroke simply re-attaches the live path in render().
   setupDrawInput() {
+    // NOTE: capture phase. Ancestors (e.g. the Live Preview editor root)
+    // may stopPropagation() on pointer events; bubble listeners would then
+    // starve while per-element listeners (resize handle) keep working.
+    // Capture sees everything first.
     const onDown = (e) => {
+      if (!this.isEnabled()) return;
       const zoneEl = e.target && e.target.closest ? e.target.closest(".pz-zone") : null;
       if (!zoneEl || !zoneEl.dataset || !zoneEl.dataset.src) return;
+      // The resize handle owns its own per-element listener; don't start a
+      // stroke for presses there (it stops propagation, which no longer
+      // shields us in the capture phase).
+      if (e.target && e.target.closest && e.target.closest(".pz-resize")) return;
       const entry = this.entries.get(zoneEl.dataset.src);
       if (!entry) return;
       this.setActive(entry.src);
@@ -729,6 +776,7 @@ class PencilZonesPlugin extends Plugin {
     };
 
     const onMove = (e) => {
+      if (!this.isEnabled()) return;
       const d = this.draw;
       if (!d || e.pointerId !== d.pointerId || e.pointerType === "touch") return;
       const entry = this.entries.get(d.entrySrc);
@@ -767,6 +815,10 @@ class PencilZonesPlugin extends Plugin {
     };
 
     const onUp = (e, commit, tag) => {
+      if (!this.isEnabled()) {
+        this.draw = null;
+        return;
+      }
       const d = this.draw;
       if (!d || e.pointerId !== d.pointerId) return;
       this.dlog(tag, "id=" + e.pointerId);
@@ -774,17 +826,18 @@ class PencilZonesPlugin extends Plugin {
     };
     const upFn = (e) => onUp(e, true, "stroke-up");
     const cancelFn = (e) => onUp(e, true, "stroke-cancel");
-    document.addEventListener("pointerdown", onDown);
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", upFn);
-    document.addEventListener("pointercancel", cancelFn);
-    document.addEventListener("lostpointercapture", cancelFn);
+    const CAP = { capture: true };
+    document.addEventListener("pointerdown", onDown, CAP);
+    document.addEventListener("pointermove", onMove, CAP);
+    document.addEventListener("pointerup", upFn, CAP);
+    document.addEventListener("pointercancel", cancelFn, CAP);
+    document.addEventListener("lostpointercapture", cancelFn, CAP);
     this.register(() => {
-      document.removeEventListener("pointerdown", onDown);
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", upFn);
-      document.removeEventListener("pointercancel", cancelFn);
-      document.removeEventListener("lostpointercapture", cancelFn);
+      document.removeEventListener("pointerdown", onDown, CAP);
+      document.removeEventListener("pointermove", onMove, CAP);
+      document.removeEventListener("pointerup", upFn, CAP);
+      document.removeEventListener("pointercancel", cancelFn, CAP);
+      document.removeEventListener("lostpointercapture", cancelFn, CAP);
     });
   }
 
@@ -855,7 +908,7 @@ class PencilZonesPlugin extends Plugin {
     let session = null; // {ids:Set, start, moved}
 
     const onStart = (e) => {
-      if (this.moveMode || !e.changedTouches) return;
+      if (!this.isEnabled() || this.moveMode || !e.changedTouches) return;
       for (const t of Array.from(e.changedTouches)) {
         map.set(t.identifier, { sx: t.clientX, sy: t.clientY, x: t.clientX, y: t.clientY });
         if (!session) session = { ids: new Set(), start: Date.now(), moved: false };
@@ -869,7 +922,7 @@ class PencilZonesPlugin extends Plugin {
     };
 
     const onMove = (e) => {
-      if (this.moveMode || !session || !e.changedTouches) return;
+      if (!this.isEnabled() || this.moveMode || !session || !e.changedTouches) return;
       for (const t of Array.from(e.changedTouches)) {
         const m = map.get(t.identifier);
         if (!m) continue;
@@ -884,6 +937,11 @@ class PencilZonesPlugin extends Plugin {
     };
 
     const onEnd = (e, isCancel) => {
+      if (!this.isEnabled()) {
+        session = null;
+        map.clear();
+        return;
+      }
       if (!e.changedTouches) return;
       for (const t of Array.from(e.changedTouches)) map.delete(t.identifier);
       if (isCancel) {
@@ -1284,6 +1342,7 @@ class PencilZonesPlugin extends Plugin {
     document.addEventListener(
       "touchstart",
       (e) => {
+        if (!this.isEnabled()) return;
         if (this.moveMode) {
           // Second finger during a move cancels it (gestures take over).
           this.cancelMove();
@@ -1321,6 +1380,7 @@ class PencilZonesPlugin extends Plugin {
     document.addEventListener(
       "touchmove",
       (e) => {
+        if (!this.isEnabled()) return;
         if (candidate && e.changedTouches) {
           for (const t of Array.from(e.changedTouches)) {
             if (t.identifier !== candidate.id) continue;
@@ -1343,6 +1403,7 @@ class PencilZonesPlugin extends Plugin {
     );
 
     const endTouch = (e, isCancel) => {
+      if (!this.isEnabled()) return;
       if (candidate && e.changedTouches) {
         for (const t of Array.from(e.changedTouches)) {
           if (t.identifier === candidate.id) {
@@ -1640,6 +1701,11 @@ class PencilZonesPlugin extends Plugin {
       return;
     }
 
+    if (!this.isEnabled()) {
+      this.renderStatic(src, el);
+      return;
+    }
+
     const plugin = this;
     const entry = this.getEntry(src, height, showLines);
     const SVGNS = "http://www.w3.org/2000/svg";
@@ -1839,6 +1905,7 @@ class PencilZonesPlugin extends Plugin {
     let resizing = false;
     let resizeStartY = 0;
     let resizeStartH = 0;
+    let scrollLock = null;
     resize.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -1846,6 +1913,13 @@ class PencilZonesPlugin extends Plugin {
       resizing = true;
       resizeStartY = e.clientY;
       resizeStartH = entry.height;
+      // Lock the surrounding scroll position: growing the canvas re-lays
+      // out the note and the view would otherwise jump/scroll mid-drag.
+      scrollLock = null;
+      try {
+        const scroller = zone.closest(".cm-scroller") || zone.closest(".markdown-preview-view");
+        if (scroller) scrollLock = { el: scroller, top: scroller.scrollTop };
+      } catch (_) {}
       try {
         resize.setPointerCapture(e.pointerId);
       } catch (_) {}
@@ -1857,10 +1931,21 @@ class PencilZonesPlugin extends Plugin {
       const scale = entry.height / Math.max(1, r.height);
       entry.height = Math.min(4000, Math.max(150, resizeStartH + (e.clientY - resizeStartY) * scale));
       render();
+      if (scrollLock && scrollLock.el) {
+        try {
+          scrollLock.el.scrollTop = scrollLock.top;
+        } catch (_) {}
+      }
     });
     async function endResize(e) {
       if (!resizing) return;
       resizing = false;
+      if (scrollLock && scrollLock.el) {
+        try {
+          scrollLock.el.scrollTop = scrollLock.top;
+        } catch (_) {}
+      }
+      scrollLock = null;
       try {
         resize.releasePointerCapture(e.pointerId);
       } catch (_) {}
@@ -1930,6 +2015,28 @@ class PencilZonesSettingTab extends PluginSettingTab {
         t.setValue(!!this.plugin.settings.verboseLog).onChange(async (v) => {
           this.plugin.settings.verboseLog = v;
           await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enabled on desktop")
+      .setDesc("When off, drawing zones render as static images on desktop apps and all input stays off. Files and notes are untouched.")
+      .addToggle((t) =>
+        t.setValue(!!this.plugin.settings.enableDesktop).onChange(async (v) => {
+          this.plugin.settings.enableDesktop = v;
+          await this.plugin.saveSettings();
+          this.plugin.applyEnabledState();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enabled on mobile")
+      .setDesc("When off, drawing zones render as static images on mobile apps (iPad etc.) and all input stays off. Files and notes are untouched.")
+      .addToggle((t) =>
+        t.setValue(!!this.plugin.settings.enableMobile).onChange(async (v) => {
+          this.plugin.settings.enableMobile = v;
+          await this.plugin.saveSettings();
+          this.plugin.applyEnabledState();
         })
       );
   }
